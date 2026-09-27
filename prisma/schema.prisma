@@ -1,0 +1,372 @@
+// Prisma schema — Habichou
+// Toutes les colonnes en snake_case (contrat JSON = snake_case côté REST).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  client
+  admin
+  livreur
+}
+
+enum CommerceCategory {
+  restaurant
+  snack
+  epicerie
+  pharmacie
+  tabac
+}
+
+enum CustomRequestStatus {
+  pending
+  quoted
+  accepted
+  rejected
+}
+
+enum OrderStatus {
+  pending
+  confirmed
+  preparing
+  picked_up
+  on_the_way
+  delivered
+  cancelled
+}
+
+enum PaymentMethod {
+  card
+  cash
+}
+
+enum PaymentStatus {
+  pending
+  paid
+  failed
+  refunded
+}
+
+model User {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  phone         String?
+  password_hash String
+  full_name     String
+  role          Role     @default(client)
+  avatar_url    String?
+  // Jeton Expo Push (app sudo_habichou) — null = notifications push non enregistrees.
+  expo_push_token String?
+  created_at    DateTime @default(now())
+
+  addresses     Address[]
+  orders        Order[]
+  custom_requests CustomRequest[]
+  notifications Notification[]
+  reviews       Review[]
+  livreur       Livreur?
+  cart          Cart?
+  refresh_tokens RefreshToken[]
+  restaurants_created Restaurant[] @relation("RestaurantCreatedBy")
+
+  @@index([role])
+}
+
+model RefreshToken {
+  id         String   @id @default(uuid())
+  user_id    String
+  token_hash String   @unique
+  expires_at DateTime
+  created_at DateTime @default(now())
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+}
+
+model Address {
+  id           String   @id @default(uuid())
+  user_id      String
+  label        String
+  latitude     Float
+  longitude    Float
+  address_text String
+  is_default   Boolean  @default(false)
+  created_at   DateTime @default(now())
+
+  user            User             @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  orders          Order[]
+  custom_requests CustomRequest[]
+
+  @@index([user_id])
+  @@index([latitude, longitude])
+}
+
+model Restaurant {
+  id                  String           @id @default(uuid())
+  name                String
+  category            CommerceCategory
+  description         String?
+  logo_url            String?
+  cover_url           String?
+  address             String
+  latitude            Float
+  longitude           Float
+  is_open             Boolean          @default(true)
+  rating              Float            @default(0)
+  opening_hours       Json?
+  created_by_admin_id String?
+  created_at          DateTime         @default(now())
+
+  products  Product[]
+  orders    Order[]
+  reviews   Review[]
+  creator   User?      @relation("RestaurantCreatedBy", fields: [created_by_admin_id], references: [id])
+
+  @@index([latitude, longitude])
+  @@index([category])
+  @@index([is_open])
+}
+
+model Product {
+  id                    String   @id @default(uuid())
+  restaurant_id         String
+  name                  String
+  description           String?
+  price                 Float
+  image_url             String?
+  category              String   @default("Divers")
+  // Type de plat transverse a tous les restaurants (Makloub, Pizza, Fricasse...)
+  // -> filtre "Par type de plat" du flux Repas. Valeur libre saisiee par l'admin.
+  dish_type             String?
+  // Lien vers la categorie de medicament (flux Pharmacie) — null hors pharmacie.
+  medication_category_id String?
+  is_available          Boolean  @default(true)
+  options               Json?
+  created_at            DateTime @default(now())
+
+  restaurant         Restaurant               @relation(fields: [restaurant_id], references: [id], onDelete: Cascade)
+  medication_category MedicationCategory?     @relation(fields: [medication_category_id], references: [id], onDelete: SetNull)
+  order_items        OrderItem[]
+  cart_items         CartItem[]
+  ingredients        ProductIngredient[]
+  supplements        ProductSupplement[]
+
+  @@index([restaurant_id])
+  @@index([restaurant_id, is_available])
+  @@index([dish_type])
+  @@index([medication_category_id])
+}
+
+// Catalogue global d'ingredients (reutilisable d'un produit a l'autre).
+// Relation produit <-> ingredient : liste informative affichee sur l'ecran produit client.
+model Ingredient {
+  id                String   @id @default(uuid())
+  name              String   @unique
+  // false = ingredient "local" (saisi pour un seul produit, absent du selecteur).
+  in_catalog        Boolean  @default(true)
+  created_by_admin  String?
+  created_at        DateTime @default(now())
+
+  products ProductIngredient[]
+}
+
+model ProductIngredient {
+  product_id    String
+  ingredient_id String
+  sort_order    Int     @default(0)
+
+  product    Product    @relation(fields: [product_id], references: [id], onDelete: Cascade)
+  ingredient Ingredient @relation(fields: [ingredient_id], references: [id], onDelete: Cascade)
+
+  @@id([product_id, ingredient_id])
+  @@index([ingredient_id])
+}
+
+// Catalogue global de supplements (ajouts optionnels payants coches par le client).
+model Supplement {
+  id                  String   @id @default(uuid())
+  name                String   @unique
+  // Prix propose par defaut ; ProductSupplement.extra_price_override peut le surcharger.
+  default_extra_price Float    @default(0)
+  // false = supplement "local" (saisi pour un seul produit, absent du selecteur).
+  in_catalog          Boolean  @default(true)
+  created_by_admin    String?
+  created_at          DateTime @default(now())
+
+  products ProductSupplement[]
+}
+
+model ProductSupplement {
+  product_id           String
+  supplement_id        String
+  // null = utiliser Supplement.default_extra_price.
+  extra_price_override Float?
+  sort_order           Int      @default(0)
+
+  product    Product    @relation(fields: [product_id], references: [id], onDelete: Cascade)
+  supplement Supplement @relation(fields: [supplement_id], references: [id], onDelete: Cascade)
+
+  @@id([product_id, supplement_id])
+  @@index([supplement_id])
+}
+
+// Categories de medicaments du flux Pharmacie — table configurable cote admin (pas en dur).
+model MedicationCategory {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  icon        String?
+  sort_order  Int      @default(0)
+  is_active   Boolean  @default(true)
+  created_at  DateTime @default(now())
+
+  products Product[]
+
+  @@index([is_active, sort_order])
+}
+
+model CustomRequest {
+  id                String              @id @default(uuid())
+  user_id           String
+  description_text  String
+  photo_url         String?
+  estimated_budget  Float?
+  status            CustomRequestStatus @default(pending)
+  admin_quote_price Float?
+  address_id        String
+  created_at        DateTime            @default(now())
+  updated_at        DateTime            @updatedAt
+
+  user    User    @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  address Address @relation(fields: [address_id], references: [id])
+  order   Order?
+
+  @@index([status])
+  @@index([user_id])
+}
+
+model Cart {
+  id         String   @id @default(uuid())
+  user_id    String   @unique
+  updated_at DateTime @updatedAt
+
+  user User       @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  items CartItem[]
+}
+
+model CartItem {
+  id         String  @id @default(uuid())
+  cart_id    String
+  product_id String
+  quantity   Int     @default(1)
+  notes      String?
+  options    Json?
+
+  cart    Cart    @relation(fields: [cart_id], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [product_id], references: [id], onDelete: Cascade)
+
+  @@unique([cart_id, product_id])
+  @@index([cart_id])
+}
+
+model Order {
+  id                String        @id @default(uuid())
+  user_id           String
+  restaurant_id     String?
+  custom_request_id String?       @unique
+  livreur_id        String?
+  status            OrderStatus   @default(pending)
+  total_price       Float
+  delivery_fee      Float         @default(15)
+  payment_method    PaymentMethod @default(cash)
+  payment_status    PaymentStatus @default(pending)
+  payment_intent_id String?
+  address_id        String
+  created_at        DateTime      @default(now())
+  delivered_at      DateTime?
+
+  user           User           @relation(fields: [user_id], references: [id])
+  restaurant     Restaurant?    @relation(fields: [restaurant_id], references: [id])
+  custom_request CustomRequest? @relation(fields: [custom_request_id], references: [id])
+  livreur        Livreur?       @relation(fields: [livreur_id], references: [id])
+  address        Address        @relation(fields: [address_id], references: [id])
+  items          OrderItem[]
+  review         Review?
+
+  @@index([status])
+  @@index([user_id])
+  @@index([livreur_id, status])
+  @@index([restaurant_id])
+  @@index([created_at])
+}
+
+model OrderItem {
+  id         String  @id @default(uuid())
+  order_id   String
+  product_id String
+  quantity   Int
+  unit_price Float
+  notes      String?
+  options    Json?
+
+  order   Order   @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [product_id], references: [id])
+
+  @@index([order_id])
+}
+
+model Livreur {
+  id           String   @id @default(uuid())
+  user_id      String   @unique
+  vehicle_type String   @default("moto")
+  current_lat  Float?
+  current_lng  Float?
+  is_online    Boolean  @default(false)
+  rating       Float    @default(0)
+  created_at   DateTime @default(now())
+
+  user   User    @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  orders Order[]
+
+  @@index([is_online])
+  @@index([current_lat, current_lng])
+}
+
+model Notification {
+  id         String   @id @default(uuid())
+  user_id    String
+  title      String
+  body       String
+  type       String   @default("info")
+  data       Json?
+  is_read    Boolean  @default(false)
+  created_at DateTime @default(now())
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id, is_read])
+}
+
+model Review {
+  id            String   @id @default(uuid())
+  order_id      String   @unique
+  user_id       String
+  restaurant_id String?
+  rating        Int
+  comment       String?
+  created_at    DateTime @default(now())
+
+  order      Order       @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  user       User        @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  restaurant Restaurant? @relation(fields: [restaurant_id], references: [id])
+
+  @@index([restaurant_id])
+  @@index([user_id])
+}

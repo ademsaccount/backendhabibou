@@ -1,0 +1,288 @@
+### Habichou API — collection de requetes (VS Code : extension "REST Client", ou importez dans Postman)
+
+@host = http://localhost:4000
+@accessToken =
+@refreshToken =
+@adminToken =
+@livreurToken =
+@restaurantId = seed-resto-1
+@addressId = seed-address-1
+
+### Health
+GET {{host}}/health
+
+### Inscription client
+POST {{host}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "test@habichou.ma",
+  "password": "Test1234!",
+  "full_name": "Test Client",
+  "phone": "+212600000010",
+  "role": "client"
+}
+
+### Inscription livreur
+POST {{host}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "livreur2@habichou.ma",
+  "password": "Test1234!",
+  "full_name": "Deuxieme Livreur",
+  "phone": "+212600000011",
+  "role": "livreur"
+}
+
+### Connexion (client seed)
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "client@habichou.ma",
+  "password": "Habichou2026!"
+}
+
+### Connexion (admin seed)
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "admin@habichou.ma",
+  "password": "Habichou2026!"
+}
+
+### Connexion (livreur seed)
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "livreur@habichou.ma",
+  "password": "Habichou2026!"
+}
+
+### Refresh token
+POST {{host}}/auth/refresh
+Content-Type: application/json
+
+{ "refresh_token": "{{refreshToken}}" }
+
+### Moi
+GET {{host}}/auth/me
+Authorization: Bearer {{accessToken}}
+
+### Restaurants proches (Casablanca)
+GET {{host}}/restaurants?lat=33.5731&lng=-7.5898&category=restaurant
+
+### Detail restaurant + menu
+GET {{host}}/restaurants/{{restaurantId}}
+
+### Adresses — liste
+GET {{host}}/addresses
+Authorization: Bearer {{accessToken}}
+
+### Adresses — creation
+POST {{host}}/addresses
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "label": "Bureau",
+  "latitude": 33.595,
+  "longitude": -7.605,
+  "address_text": "10 Rue Ourika, Casablanca",
+  "is_default": false
+}
+
+### Demande libre — creation
+POST {{host}}/custom-requests
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "description_text": "Livresse-moi un bouquet de fleurs et un cadeau d'anniversaire",
+  "estimated_budget": 200,
+  "address_id": "{{addressId}}"
+}
+
+### Demandes libres — mes demandes
+GET {{host}}/custom-requests/me
+Authorization: Bearer {{accessToken}}
+
+### Admin — dashboard
+GET {{host}}/admin/dashboard
+Authorization: Bearer {{adminToken}}
+
+### Admin — liste demandes en attente
+GET {{host}}/admin/custom-requests?status=pending
+Authorization: Bearer {{adminToken}}
+
+### Admin — proposer un prix
+PUT {{host}}/admin/custom-requests/<customRequestId>/quote
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{ "admin_quote_price": 180 }
+
+### Commande — depuis le panier
+POST {{host}}/orders
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "address_id": "{{addressId}}",
+  "payment_method": "cash",
+  "items": [
+    { "product_id": "<productId>", "quantity": 2, "notes": "sans oignons" }
+  ]
+}
+
+### Commande — depuis une demande acceptee
+POST {{host}}/orders
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "address_id": "{{addressId}}",
+  "payment_method": "cash",
+  "custom_request_id": "<customRequestId>"
+}
+
+### Mes commandes
+GET {{host}}/orders/me
+Authorization: Bearer {{accessToken}}
+
+### Detail commande
+GET {{host}}/orders/<orderId>
+Authorization: Bearer {{accessToken}}
+
+### Payer par carte (Stripe ou simule)
+POST {{host}}/orders/<orderId>/pay
+Authorization: Bearer {{accessToken}}
+
+### Noter une commande livree
+POST {{host}}/orders/<orderId>/rate
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "rating": 5, "comment": "Top !" }
+
+### Admin — toutes les commandes
+GET {{host}}/admin/orders?status=pending
+Authorization: Bearer {{adminToken}}
+
+### Admin — confirmer
+PUT {{host}}/admin/orders/<orderId>/status
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{ "status": "confirmed" }
+
+### Admin — en preparation
+PUT {{host}}/admin/orders/<orderId>/status
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{ "status": "preparing" }
+
+### Admin — assigner un livreur (auto)
+PUT {{host}}/admin/orders/<orderId>/assign
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{ "auto": true }
+
+### Admin — assignation manuelle
+PUT {{host}}/admin/orders/<orderId>/assign
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{ "livreur_id": "<livreurUserId>" }
+
+### Admin — CRUD commerce
+POST {{host}}/admin/restaurants
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "Snack Delta",
+  "category": "snack",
+  "description": "Paninis et sandwiches",
+  "address": "55 Bd Zerktouni, Casablanca",
+  "latitude": 33.5712,
+  "longitude": -7.5865,
+  "is_open": true
+}
+
+### Admin — ajout produit
+POST {{host}}/admin/restaurants/<restaurantId>/products
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "Panini Thon",
+  "price": 32,
+  "category": "Paninis",
+  "description": "Thon, fromage, salade",
+  "is_available": true
+}
+
+### Admin — produits d'un commerce
+GET {{host}}/admin/restaurants/<restaurantId>/products
+Authorization: Bearer {{adminToken}}
+
+### Admin — liste livreurs
+GET {{host}}/admin/livreurs
+Authorization: Bearer {{adminToken}}
+
+### Admin — forcer hors ligne
+PUT {{host}}/admin/livreurs/<livreurUserId>
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{ "is_online": false }
+
+### Livreur — profil
+GET {{host}}/livreur/profile
+Authorization: Bearer {{livreurToken}}
+
+### Livreur — basculer en ligne
+PUT {{host}}/livreur/online
+Authorization: Bearer {{livreurToken}}
+Content-Type: application/json
+
+{ "is_online": true }
+
+### Livreur — mes courses
+GET {{host}}/livreur/orders/assigned?view=active
+Authorization: Bearer {{livreurToken}}
+
+### Livreur — passer en route
+PUT {{host}}/livreur/orders/<orderId>/status
+Authorization: Bearer {{livreurToken}}
+Content-Type: application/json
+
+{ "status": "on_the_way" }
+
+### Livreur — mise a jour position GPS
+PUT {{host}}/livreur/location
+Authorization: Bearer {{livreurToken}}
+Content-Type: application/json
+
+{ "lat": 33.58, "lng": -7.60, "order_id": "<orderId>" }
+
+### Livreur — stats / gains
+GET {{host}}/livreur/stats
+Authorization: Bearer {{livreurToken}}
+
+### Notifications
+GET {{host}}/notifications/me
+Authorization: Bearer {{accessToken}}
+
+### Upload image (multipart)
+POST {{host}}/uploads?folder=custom_requests
+Authorization: Bearer {{accessToken}}
+Content-Type: multipart/form-data
+
+; form-data file: @photo.jpg
