@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from 'express';
 import { ZodError } from 'zod';
+import type { ErrorCode } from './errorCodes';
 import { logger } from './logger';
 
 export class ApiError extends Error {
@@ -14,22 +15,22 @@ export class ApiError extends Error {
     this.details = details;
   }
 
-  static badRequest(message: string, code = 'BAD_REQUEST', details?: unknown) {
+  static badRequest(message: string, code: ErrorCode = 'BAD_REQUEST', details?: unknown) {
     return new ApiError(400, code, message, details);
   }
-  static unauthorized(message = 'Non authentifie', code = 'UNAUTHORIZED') {
+  static unauthorized(message = 'Non authentifie', code: ErrorCode = 'UNAUTHORIZED') {
     return new ApiError(401, code, message);
   }
-  static forbidden(message = 'Acces refuse', code = 'FORBIDDEN') {
+  static forbidden(message = 'Acces refuse', code: ErrorCode = 'FORBIDDEN') {
     return new ApiError(403, code, message);
   }
-  static notFound(message = 'Ressource introuvable', code = 'NOT_FOUND') {
+  static notFound(message = 'Ressource introuvable', code: ErrorCode = 'NOT_FOUND') {
     return new ApiError(404, code, message);
   }
-  static conflict(message: string, code = 'CONFLICT', details?: unknown) {
+  static conflict(message: string, code: ErrorCode = 'CONFLICT', details?: unknown) {
     return new ApiError(409, code, message, details);
   }
-  static notImplemented(message: string, code = 'NOT_IMPLEMENTED') {
+  static notImplemented(message: string, code: ErrorCode = 'NOT_IMPLEMENTED') {
     return new ApiError(501, code, message);
   }
 }
