@@ -15,7 +15,8 @@ const EnvSchema = z.object({
   JWT_ACCESS_TTL: z.string().default('15m'),
   JWT_REFRESH_TTL: z.string().default('7d'),
   DELIVERY_FEE: z.coerce.number().min(0).default(15),
-  NEARBY_RADIUS_KM: z.coerce.number().min(0).default(20),
+  /** Fuseau horaire utilise pour comparer opening_hours a l'heure courante. */
+  BUSINESS_TZ: z.string().default('Africa/Tunis'),
   STRIPE_SECRET_KEY: z.string().default(''),
   STRIPE_CURRENCY: z.string().default('mad'),
 });

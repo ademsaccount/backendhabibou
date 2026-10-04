@@ -5,6 +5,7 @@ import { requireAuth, requireRole } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { createOrderSchema, idParam, orderStatusFilterQuery, rateOrderSchema } from '../schemas';
 import { deliveryFee } from '../services/order.service';
+import { isOpenNow } from '../lib/open';
 import { notify, notifyAdmins } from '../lib/notify';
 import { pushAdmins } from '../lib/push';
 import { emitToAdmins } from '../socket/io';
@@ -175,7 +176,7 @@ orderRouter.post(
       if (!restaurantId) throw ApiError.badRequest('Aucun produit valide', 'INVALID_ITEMS');
       const restaurant = await tx.restaurant.findUnique({ where: { id: restaurantId } });
       if (!restaurant) throw ApiError.notFound('Commerce introuvable');
-      if (!restaurant.is_open) throw ApiError.badRequest('Commerce ferme actuellement', 'RESTAURANT_CLOSED');
+      if (!isOpenNow(restaurant)) throw ApiError.badRequest('Commerce ferme actuellement', 'RESTAURANT_CLOSED');
 
       return tx.order.create({
         data: {

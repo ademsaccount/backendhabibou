@@ -121,6 +121,8 @@ model Restaurant {
   is_open             Boolean          @default(true)
   rating              Float            @default(0)
   opening_hours       Json?
+  /** Fermeture exceptionnelle : le commerce reste ferme jusqu'a cette date/heure (revert automatique). */
+  temp_closed_until   DateTime?
   created_by_admin_id String?
   created_at          DateTime         @default(now())
 

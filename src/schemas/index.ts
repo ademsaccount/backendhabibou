@@ -175,6 +175,8 @@ export const createRestaurantSchema = z.object({
     longitude: z.coerce.number().min(-180).max(180),
     is_open: z.boolean().optional(),
     opening_hours: openingHoursSchema.nullable().optional(),
+    /** Fermeture exceptionnelle ISO 8601 (revert automatique passa cette date) ; null = lever la fermeture. */
+    temp_closed_until: z.string().datetime({ offset: true }).nullable().optional(),
   }),
 });
 

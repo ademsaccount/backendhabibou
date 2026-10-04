@@ -12,15 +12,32 @@ import {
 } from '../schemas';
 import { haversineKm, roundKm } from '../lib/geo';
 import { productCatalogInclude, withCatalogs } from '../lib/catalog';
-import { env } from '../config/env';
+import { isOpenNow } from '../lib/open';
 import type { Prisma } from '@prisma/client';
 
 export const publicRouter = Router();
 
 /** Produit + restaurant résumé (listes des flux Repas / Épicerie / Pharmacie). */
 const productListInclude: Prisma.ProductInclude = {
-  restaurant: { select: { id: true, name: true, is_open: true, category: true } },
+  restaurant: {
+    select: {
+      id: true,
+      name: true,
+      is_open: true,
+      category: true,
+      opening_hours: true,
+      temp_closed_until: true,
+    },
+  },
 };
+
+/** Recalcule l'is_open "effectif" (horaires + fermeture temporaire) d'un produit. */
+function withOpenRestaurant<T extends { restaurant?: { is_open: boolean; opening_hours?: unknown; temp_closed_until?: Date | null } | null }>(
+  product: T,
+): T {
+  if (!product.restaurant) return product;
+  return { ...product, restaurant: { ...product.restaurant, is_open: isOpenNow(product.restaurant) } };
+}
 
 publicRouter.get(
   '/restaurants',
@@ -41,19 +58,19 @@ publicRouter.get(
       orderBy: { created_at: 'desc' },
     });
 
-    let result = restaurants.map((r) => ({
+    const result = restaurants.map((r) => ({
       ...r,
+      is_open: isOpenNow(r),
       distance_km:
         lat != null && lng != null ? roundKm(haversineKm(lat, lng, r.latitude, r.longitude)) : null,
     }));
 
-    if (lat != null && lng != null) {
-      result = result.sort((a, b) => (a.distance_km ?? 0) - (b.distance_km ?? 0));
-      // Rayon de proximite : on le garde comme priorite, mais jamais au prix d'une liste
-      // vide (utilisateur hors zone => on renvoie tous les commerces tries par distance).
-      const nearby = result.filter((r) => r.distance_km != null && r.distance_km <= env.NEARBY_RADIUS_KM);
-      if (nearby.length > 0) result = nearby;
-    }
+    // Ouverts d'abord, puis par distance croissante (les fermetures passent en fin de liste).
+    result.sort((a, b) => {
+      if (a.is_open !== b.is_open) return a.is_open ? -1 : 1;
+      if (lat == null || lng == null) return 0;
+      return (a.distance_km ?? 0) - (b.distance_km ?? 0);
+    });
 
     res.json(result);
   }),
@@ -74,7 +91,7 @@ publicRouter.get(
       },
     });
     if (!restaurant) throw ApiError.notFound('Commerce introuvable');
-    res.json(restaurant);
+    res.json({ ...restaurant, is_open: isOpenNow(restaurant) });
   }),
 );
 
@@ -130,7 +147,7 @@ publicRouter.get(
       orderBy: [{ category: 'asc' }, { name: 'asc' }],
       take: 300,
     });
-    res.json(products);
+    res.json(products.map(withOpenRestaurant));
   }),
 );
 
@@ -155,12 +172,20 @@ publicRouter.get(
     const product = await prisma.product.findUnique({
       where: { id: req.params.id },
       include: {
-        restaurant: { select: { id: true, name: true, is_open: true } },
+        restaurant: {
+          select: {
+            id: true,
+            name: true,
+            is_open: true,
+            opening_hours: true,
+            temp_closed_until: true,
+          },
+        },
         ...productCatalogInclude,
       },
     });
     if (!product) throw ApiError.notFound('Produit introuvable');
-    res.json(withCatalogs(product));
+    res.json(withCatalogs(withOpenRestaurant(product)));
   }),
 );
 
