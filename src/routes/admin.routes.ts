@@ -41,7 +41,22 @@ import type { Prisma } from '@prisma/client';
 type ProductBody = {
   ingredients?: IngredientInput[];
   supplements?: SupplementInput[];
+  sizes?: { label: string; price: number }[] | null;
 } & Record<string, unknown>;
+
+/**
+ * Tailles multiples : dès 2 entrées, price est resynchronisé sur le minimum
+ * (affichage « à partir de X » + valeur de repli pour le code qui lit
+ * product.price). sizes vide ou à 1 entrée : price inchangé.
+ */
+function applySizePrice(data: Record<string, unknown>): void {
+  const sizes = data.sizes;
+  if (!Array.isArray(sizes) || sizes.length < 2) return;
+  const prices = sizes
+    .map((entry) => (entry && typeof entry === 'object' ? (entry as { price?: unknown }).price : undefined))
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  if (prices.length >= 2) data.price = Math.min(...prices);
+}
 
 const productInclude: Prisma.ProductInclude = {
   restaurant: { select: { id: true, name: true } },
@@ -162,12 +177,12 @@ adminRouter.delete(
   asyncHandler(async (req, res) => {
     const existing = await prisma.restaurant.findUnique({ where: { id: req.params.id } });
     if (!existing) throw ApiError.notFound('Commerce introuvable');
-    const orderCount = await prisma.order.count({ where: { restaurant_id: existing.id } });
-    if (orderCount > 0) {
-      await prisma.restaurant.update({ where: { id: existing.id }, data: { is_open: false } });
-      throw ApiError.conflict('Commerce deja commande : fermeture a la place de la suppression', 'HAS_ORDERS');
-    }
-    await prisma.restaurant.delete({ where: { id: existing.id } });
+    // Suppression en cascade assumée : commandes (→ OrderItem/avis) puis commerce (→ produits).
+    // L'ordre est important : Order.restaurant_id est en SET NULL, pas CASCADE.
+    await prisma.$transaction(async (tx) => {
+      await tx.order.deleteMany({ where: { restaurant_id: existing.id } });
+      await tx.restaurant.delete({ where: { id: existing.id } });
+    }, TX_OPTS);
     res.status(204).send();
   }),
 );
@@ -198,6 +213,7 @@ adminRouter.post(
 
     const { ingredients, supplements, ...data } = req.validated?.body as ProductBody;
     await assertMedicationCategory(data.medication_category_id as string | null | undefined);
+    applySizePrice(data);
 
     const product = await prisma.$transaction(async (tx) => {
       const created = await tx.product.create({
@@ -220,6 +236,7 @@ adminRouter.put(
 
     const { ingredients, supplements, ...data } = req.validated?.body as ProductBody;
     await assertMedicationCategory(data.medication_category_id as string | null | undefined);
+    applySizePrice(data);
 
     const product = await prisma.$transaction(async (tx) => {
       const updated = await tx.product.update({

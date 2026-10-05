@@ -145,8 +145,11 @@ model Product {
   image_url             String?
   category              String   @default("Divers")
   // Type de plat transverse a tous les restaurants (Makloub, Pizza, Fricasse...)
-  // -> filtre "Par type de plat" du flux Repas. Valeur libre saisiee par l'admin.
+  // -> filtre "Par type de plat" du flux Repas. Valeur libre saisie par l'admin.
   dish_type             String?
+  // Tailles multiples (2+ : Medium/Large/...) : [{ label, price }].
+  // Des que 2 tailles ou plus, price = min des tailles ("a partir de X").
+  sizes                 Json?
   // Lien vers la categorie de medicament (flux Pharmacie) — null hors pharmacie.
   medication_category_id String?
   is_available          Boolean  @default(true)
@@ -270,6 +273,8 @@ model CartItem {
   quantity   Int     @default(1)
   notes      String?
   options    Json?
+  // Taille choisie (remplace le prix de base, distinct des suppléments).
+  size_label String?
 
   cart    Cart    @relation(fields: [cart_id], references: [id], onDelete: Cascade)
   product Product @relation(fields: [product_id], references: [id], onDelete: Cascade)
@@ -317,6 +322,8 @@ model OrderItem {
   unit_price Float
   notes      String?
   options    Json?
+  // Taille choisie (remplace le prix de base, distinct des suppléments).
+  size_label String?
 
   order   Order   @relation(fields: [order_id], references: [id], onDelete: Cascade)
   product Product @relation(fields: [product_id], references: [id])

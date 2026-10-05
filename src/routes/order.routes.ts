@@ -78,6 +78,20 @@ function optionDelta(catalogOptions: unknown, selectedOptions: unknown): number 
   return delta;
 }
 
+/** Lit le tableau JSON Product.sizes : [{label, price}] valides uniquement. */
+function parseProductSizes(raw: unknown): { label: string; price: number }[] {
+  if (!Array.isArray(raw)) return [];
+  const out: { label: string; price: number }[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const { label, price } = entry as { label?: unknown; price?: unknown };
+    if (typeof label === 'string' && label.trim() && typeof price === 'number' && Number.isFinite(price)) {
+      out.push({ label: label.trim(), price });
+    }
+  }
+  return out;
+}
+
 export const orderRouter = Router();
 orderRouter.use(requireAuth, requireRole('client'));
 
@@ -91,7 +105,7 @@ orderRouter.post(
       payment_method: 'card' | 'cash';
       // Commande issue d'une "Demande spécifique" (devis admin accepté).
       custom_request_id?: string;
-      items?: { product_id: string; quantity: number; notes?: string; options?: unknown }[];
+      items?: { product_id: string; quantity: number; notes?: string; options?: unknown; size_label?: string }[];
     };
 
     const address = await prisma.address.findUnique({ where: { id: body.address_id } });
@@ -162,7 +176,19 @@ orderRouter.post(
         collectCatalogEntries(product.options, catalog);
         catalog.push(...(supplementsByProduct.get(product.id) ?? []));
 
-        const unit = product.price + optionDelta(catalog, item.options);
+        // Taille : prix résolu côté serveur depuis Product.sizes (jamais le prix client).
+        const sizes = parseProductSizes(product.sizes);
+        let basePrice = product.price;
+        let sizeLabel: string | null = null;
+        if (item.size_label) {
+          const found = sizes.find((entry) => entry.label === item.size_label);
+          if (!found) throw ApiError.badRequest(`Taille inconnue : ${item.size_label}`, 'SIZE_NOT_FOUND');
+          sizeLabel = found.label;
+          // Une seule taille enregistrée : sizes ignoré pour le prix (price = vérité).
+          if (sizes.length >= 2) basePrice = found.price;
+        }
+
+        const unit = basePrice + optionDelta(catalog, item.options);
         subtotal += unit * item.quantity;
         orderItems.push({
           product_id: product.id,
@@ -170,6 +196,7 @@ orderRouter.post(
           unit_price: unit,
           notes: item.notes,
           options: item.options as Prisma.InputJsonValue | undefined,
+          size_label: sizeLabel,
         });
       }
 

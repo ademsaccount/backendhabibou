@@ -98,6 +98,8 @@ export const createOrderSchema = z.object({
             quantity: z.number().int().min(1).max(50),
             notes: z.string().max(300).optional(),
             options: z.unknown().optional(),
+            // Taille choisie (produit à tailles multiples) — distinct des options.
+            size_label: z.string().trim().min(1).max(60).optional(),
           }),
         )
         .min(1)
@@ -216,6 +218,12 @@ export const supplementInput = z
     path: ['name'],
   });
 
+/** Taille d'un produit (2+ = tailles multiples : Medium/Large/…). */
+export const sizeInput = z.object({
+  label: z.string().trim().min(1),
+  price: z.coerce.number().gt(0),
+});
+
 export const createProductSchema = z.object({
   params: idParam,
   body: z.object({
@@ -228,6 +236,7 @@ export const createProductSchema = z.object({
     medication_category_id: z.string().trim().min(1).nullable().optional(),
     is_available: z.boolean().optional(),
     options: z.unknown().optional(),
+    sizes: z.array(sizeInput).min(1).max(20).nullable().optional(),
     ingredients: z.array(ingredientInput).max(80).optional(),
     supplements: z.array(supplementInput).max(80).optional(),
   }),
@@ -246,6 +255,7 @@ export const updateProductSchema = z.object({
       medication_category_id: z.string().trim().min(1).nullable().optional(),
       is_available: z.boolean().optional(),
       options: z.unknown().nullable().optional(),
+      sizes: z.array(sizeInput).min(1).max(20).nullable().optional(),
       ingredients: z.array(ingredientInput).max(80).optional(),
       supplements: z.array(supplementInput).max(80).optional(),
     }),
