@@ -5,6 +5,7 @@ import { requireAuth, requireRole } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { createCustomRequestSchema, customRequestStatusFilterQuery, idParam, quoteSchema } from '../schemas';
 import { notify, notifyAdmins } from '../lib/notify';
+import { pushCustomQuoteToUser } from '../lib/push';
 import { emitToAdmins, emitToUser } from '../socket/io';
 
 const includeCR = {
@@ -157,6 +158,12 @@ adminCustomRequestRouter.put(
       type: 'custom_request',
       data: { custom_request_id: updated.id },
     });
+    // Push client (devis recu) — apres la mise a jour, best effort.
+    try {
+      await pushCustomQuoteToUser(cr.user_id, updated.id, admin_quote_price);
+    } catch (err) {
+      void err;
+    }
     res.json(updated);
   }),
 );

@@ -7,7 +7,7 @@ import { createOrderSchema, idParam, orderStatusFilterQuery, rateOrderSchema } f
 import { deliveryFee } from '../services/order.service';
 import { isOpenNow } from '../lib/open';
 import { notify, notifyAdmins } from '../lib/notify';
-import { pushAdmins } from '../lib/push';
+import { pushAdmins, pushOrderStatusToUser } from '../lib/push';
 import { emitToAdmins } from '../socket/io';
 import { createPaymentIntent, stripeEnabled } from '../lib/stripe';
 import type { Prisma } from '@prisma/client';
@@ -360,6 +360,12 @@ orderRouter.put(
       type: 'order',
       data: { order_id: order.id },
     });
+    // Push client (annulation) — apres la mise a jour, best effort.
+    try {
+      await pushOrderStatusToUser(updated.user_id, updated.id, 'cancelled');
+    } catch (err) {
+      void err;
+    }
     res.json(updated);
   }),
 );

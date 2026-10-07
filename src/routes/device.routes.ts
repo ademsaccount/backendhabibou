@@ -18,13 +18,22 @@ deviceRouter.post(
   '/push-token',
   validate(pushTokenSchema),
   asyncHandler(async (req, res) => {
-    const { push_token } = req.validated?.body as { push_token: string | null };
+    const { push_token, locale } = req.validated?.body as {
+      push_token: string | null;
+      locale?: 'fr' | 'en' | 'aeb';
+    };
     if (!req.user?.id) throw ApiError.unauthorized();
     await prisma.user.update({
       where: { id: req.user.id },
-      data: { expo_push_token: push_token },
+      data: {
+        expo_push_token: push_token,
+        ...(locale ? { locale } : {}),
+      },
     });
-    logger.info('push', `jeton ${push_token ? 'enregistre' : 'retire'} user=${req.user.id}`);
+    logger.info(
+      'push',
+      `jeton ${push_token ? 'enregistre' : 'retire'} user=${req.user.id}${locale ? ` locale=${locale}` : ''}`,
+    );
     res.json({ ok: true, registered: Boolean(push_token) });
   }),
 );

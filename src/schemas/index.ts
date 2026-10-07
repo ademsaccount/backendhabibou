@@ -305,11 +305,13 @@ export const updateLivreurSchema = z.object({
 });
 // --- FIN DÉSACTIVÉ ---
 
-/* ------------- Push notifications (app sudo_habichou) ------------- */
+/* ------------- Push notifications (app sudo_habichou + habichou) ------------- */
 
 // push_token: null = désinscription du jeton.
+// locale: langue du client pour localiser les pushes (optionnel, fr | en | aeb).
 export const pushTokenSchema = z.object({
   body: z.object({
     push_token: z.string().trim().min(1).max(300).nullable(),
+    locale: z.enum(['fr', 'en', 'aeb']).optional(),
   }),
 });

@@ -6,6 +6,7 @@ import { ApiError } from '../lib/errors';
 // import { haversineKm, roundKm } from '../lib/geo';
 // --- FIN DÉSACTIVÉ ---
 import { notify, notifyAdmins } from '../lib/notify';
+import { pushOrderStatusToUser } from '../lib/push';
 import { emitToOrder } from '../socket/io';
 import { stripeEnabled } from '../lib/stripe';
 
@@ -120,6 +121,15 @@ export async function changeOrderStatus(
     await notifyAdmins('Commande ' + STATUS_LABELS[to].toLowerCase(), `Commande ${updated.id.slice(0, 8)}`, 'order', {
       order_id: updated.id,
     });
+  }
+
+  // Push client (confirmed / on_the_way / delivered / cancelled) — APRES la mise a
+  // jour en base, best effort : ne doit jamais faire echouer la requete principale.
+  try {
+    await pushOrderStatusToUser(updated.user_id, updated.id, to);
+  } catch (err) {
+    // pushToUser n leve pas — garde-fou par principe.
+    void err;
   }
 
   return updated;

@@ -63,6 +63,8 @@ model User {
   avatar_url    String?
   // Jeton Expo Push (app sudo_habichou) — null = notifications push non enregistrees.
   expo_push_token String?
+  // Locale du client pour localiser les pushes (fr | en | aeb).
+  locale          String?
   created_at    DateTime @default(now())
 
   addresses     Address[]
