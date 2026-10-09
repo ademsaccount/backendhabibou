@@ -53,6 +53,11 @@ enum PaymentStatus {
   refunded
 }
 
+enum StoryMedia {
+  image
+  video
+}
+
 model User {
   id            String   @id @default(uuid())
   email         String   @unique
@@ -131,6 +136,7 @@ model Restaurant {
   products  Product[]
   orders    Order[]
   reviews   Review[]
+  stories   Story[]
   creator   User?      @relation("RestaurantCreatedBy", fields: [created_by_admin_id], references: [id])
 
   @@index([latitude, longitude])
@@ -380,4 +386,24 @@ model Review {
 
   @@index([restaurant_id])
   @@index([user_id])
+}
+
+/** Story d'offre d'un commerce (style Instagram) : image ou vidéo + texte optionnel. */
+model Story {
+  id                  String     @id @default(uuid())
+  restaurant_id       String
+  media_url           String
+  media_type          StoryMedia
+  /** Légende affichée sur le média (emojis inclus). */
+  text                String?
+  /** Fin de diffusion (null = sans limite). */
+  expires_at          DateTime?
+  is_active           Boolean    @default(true)
+  created_by_admin_id String?
+  created_at          DateTime   @default(now())
+
+  restaurant Restaurant @relation(fields: [restaurant_id], references: [id], onDelete: Cascade)
+
+  @@index([restaurant_id])
+  @@index([expires_at])
 }

@@ -95,6 +95,27 @@ publicRouter.get(
   }),
 );
 
+/* ------------- Stories d'offres (vitrine Instagram) ------------- */
+
+publicRouter.get(
+  '/stories',
+  asyncHandler(async (_req, res) => {
+    const now = new Date();
+    const stories = await prisma.story.findMany({
+      where: {
+        is_active: true,
+        OR: [{ expires_at: null }, { expires_at: { gt: now } }],
+      },
+      include: {
+        restaurant: { select: { id: true, name: true, logo_url: true } },
+      },
+      orderBy: { created_at: 'desc' },
+      take: 100,
+    });
+    res.json(stories);
+  }),
+);
+
 /* ------------- Flux Repas → "Par type de plat" (transverse aux commerces) ------------- */
 
 publicRouter.get(

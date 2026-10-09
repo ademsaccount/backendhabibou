@@ -12,6 +12,7 @@ import {
   createMedicationCategorySchema,
   createProductSchema,
   createRestaurantSchema,
+  createStorySchema,
   createSupplementSchema,
   idParam,
   adminOrderStatusSchema,
@@ -19,6 +20,7 @@ import {
   updateMedicationCategorySchema,
   updateProductSchema,
   updateRestaurantSchema,
+  updateStorySchema,
 } from '../schemas';
 import {
   productCatalogInclude,
@@ -183,6 +185,104 @@ adminRouter.delete(
       await tx.order.deleteMany({ where: { restaurant_id: existing.id } });
       await tx.restaurant.delete({ where: { id: existing.id } });
     }, TX_OPTS);
+    res.status(204).send();
+  }),
+);
+
+/* ---------------- Stories ---------------- */
+
+const storyInclude = {
+  restaurant: { select: { id: true, name: true, logo_url: true } },
+} as const;
+
+adminRouter.get(
+  '/stories',
+  asyncHandler(async (_req, res) => {
+    const stories = await prisma.story.findMany({
+      include: storyInclude,
+      orderBy: { created_at: 'desc' },
+    });
+    res.json(stories);
+  }),
+);
+
+adminRouter.post(
+  '/stories',
+  validate(createStorySchema),
+  asyncHandler(async (req, res) => {
+    const body = req.validated?.body as {
+      restaurant_id: string;
+      media_url: string;
+      media_type: 'image' | 'video';
+      text?: string | null;
+      duration_hours?: number | null;
+    };
+    const restaurant = await prisma.restaurant.findUnique({ where: { id: body.restaurant_id } });
+    if (!restaurant) throw ApiError.notFound('Commerce introuvable');
+    const story = await prisma.story.create({
+      data: {
+        restaurant_id: body.restaurant_id,
+        media_url: body.media_url,
+        media_type: body.media_type,
+        text: body.text ?? null,
+        expires_at:
+          body.duration_hours != null
+            ? new Date(Date.now() + body.duration_hours * 3_600_000)
+            : null,
+        created_by_admin_id: req.user!.id,
+      },
+      include: storyInclude,
+    });
+    res.status(201).json(story);
+  }),
+);
+
+adminRouter.get(
+  '/stories/:id',
+  validate({ params: idParam }),
+  asyncHandler(async (req, res) => {
+    const story = await prisma.story.findUnique({
+      where: { id: req.params.id },
+      include: storyInclude,
+    });
+    if (!story) throw ApiError.notFound('Story introuvable');
+    res.json(story);
+  }),
+);
+
+adminRouter.put(
+  '/stories/:id',
+  validate(updateStorySchema),
+  asyncHandler(async (req, res) => {
+    const existing = await prisma.story.findUnique({ where: { id: req.params.id } });
+    if (!existing) throw ApiError.notFound('Story introuvable');
+    const body = req.validated?.body as {
+      text?: string | null;
+      is_active?: boolean;
+      expires_at?: string | null;
+    };
+    const story = await prisma.story.update({
+      where: { id: existing.id },
+      data: {
+        ...(body.text !== undefined ? { text: body.text } : {}),
+        ...(body.is_active !== undefined ? { is_active: body.is_active } : {}),
+        ...(body.expires_at !== undefined
+          ? { expires_at: body.expires_at ? new Date(body.expires_at) : null }
+          : {}),
+      },
+      include: storyInclude,
+    });
+    res.json(story);
+  }),
+);
+
+adminRouter.delete(
+  '/stories/:id',
+  validate({ params: idParam }),
+  asyncHandler(async (req, res) => {
+    const existing = await prisma.story.findUnique({ where: { id: req.params.id } });
+    if (!existing) throw ApiError.notFound('Story introuvable');
+    await prisma.story.delete({ where: { id: existing.id } });
     res.status(204).send();
   }),
 );

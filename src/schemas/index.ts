@@ -187,6 +187,28 @@ export const updateRestaurantSchema = z.object({
   body: createRestaurantSchema.shape.body.partial(),
 });
 
+/** Story d'offre : image ou vidéo + texte optionnel, durée choisie par l'admin. */
+export const createStorySchema = z.object({
+  body: z.object({
+    restaurant_id: z.string().min(1),
+    media_url: z.string().min(1),
+    media_type: z.enum(['image', 'video']),
+    text: z.string().trim().max(200).nullable().optional(),
+    /** Durée de diffusion en heures (null = sans limite). */
+    duration_hours: z.coerce.number().int().min(1).max(720).nullable().optional(),
+  }),
+});
+
+export const updateStorySchema = z.object({
+  params: idParam,
+  body: z.object({
+    text: z.string().trim().max(200).nullable().optional(),
+    is_active: z.boolean().optional(),
+    /** Fin de diffusion ISO 8601 (null = sans limite). */
+    expires_at: z.string().datetime({ offset: true }).nullable().optional(),
+  }),
+});
+
 /** Ingrédient d'un plat : id de catalogue existant OU nouveau nom. */
 export const ingredientInput = z
   .object({
