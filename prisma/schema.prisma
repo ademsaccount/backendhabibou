@@ -396,6 +396,13 @@ model Story {
   media_type          StoryMedia
   /** Légende affichée sur le média (emojis inclus). */
   text                String?
+  /** Couleur du texte (hex #RRGGBB), null = blanc. */
+  text_color          String?
+  /** Position du texte en fractions d'écran centrées (-0.5..0.5), null = bas centré. */
+  text_x              Float?
+  text_y              Float?
+  /** Échelle du texte (0.5..3), null = 1. */
+  text_scale          Float?
   /** Fin de diffusion (null = sans limite). */
   expires_at          DateTime?
   is_active           Boolean    @default(true)

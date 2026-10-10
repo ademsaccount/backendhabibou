@@ -132,3 +132,8 @@ export function emitToOrder(orderId: string, event: string, payload: unknown) {
 export function emitToAdmins(event: string, payload: unknown) {
   io?.to('admins').emit(event, payload);
 }
+
+/** Diffusion à tous les sockets connectés (ex. catalogue public modifié). */
+export function broadcast(event: string, payload: unknown) {
+  io?.emit(event, payload);
+}

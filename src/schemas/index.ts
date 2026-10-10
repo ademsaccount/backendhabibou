@@ -187,13 +187,22 @@ export const updateRestaurantSchema = z.object({
   body: createRestaurantSchema.shape.body.partial(),
 });
 
-/** Story d'offre : image ou vidéo + texte optionnel, durée choisie par l'admin. */
+/** Story d'offre : image + texte optionnel (vidéo désactivée pour l'instant). */
 export const createStorySchema = z.object({
   body: z.object({
     restaurant_id: z.string().min(1),
     media_url: z.string().min(1),
-    media_type: z.enum(['image', 'video']),
+    media_type: z.literal('image'),
     text: z.string().trim().max(200).nullable().optional(),
+    text_color: z
+      .string()
+      .regex(/^#[0-9a-fA-F]{6}$/, 'Couleur hexadécimale #RRGGBB')
+      .nullable()
+      .optional(),
+    /** Position du texte en fractions d'écran centrées. */
+    text_x: z.coerce.number().min(-0.5).max(0.5).nullable().optional(),
+    text_y: z.coerce.number().min(-0.5).max(0.5).nullable().optional(),
+    text_scale: z.coerce.number().min(0.5).max(3).nullable().optional(),
     /** Durée de diffusion en heures (null = sans limite). */
     duration_hours: z.coerce.number().int().min(1).max(720).nullable().optional(),
   }),
@@ -203,6 +212,14 @@ export const updateStorySchema = z.object({
   params: idParam,
   body: z.object({
     text: z.string().trim().max(200).nullable().optional(),
+    text_color: z
+      .string()
+      .regex(/^#[0-9a-fA-F]{6}$/, 'Couleur hexadécimale #RRGGBB')
+      .nullable()
+      .optional(),
+    text_x: z.coerce.number().min(-0.5).max(0.5).nullable().optional(),
+    text_y: z.coerce.number().min(-0.5).max(0.5).nullable().optional(),
+    text_scale: z.coerce.number().min(0.5).max(3).nullable().optional(),
     is_active: z.boolean().optional(),
     /** Fin de diffusion ISO 8601 (null = sans limite). */
     expires_at: z.string().datetime({ offset: true }).nullable().optional(),

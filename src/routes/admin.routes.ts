@@ -38,6 +38,7 @@ import { changeOrderStatus } from '../services/order.service';
 // import { haversineKm, roundKm } from '../lib/geo';
 // --- FIN DÉSACTIVÉ ---
 import { orderInclude } from './order.routes';
+import { broadcast } from '../socket/io';
 import type { Prisma } from '@prisma/client';
 
 type ProductBody = {
@@ -215,6 +216,10 @@ adminRouter.post(
       media_url: string;
       media_type: 'image' | 'video';
       text?: string | null;
+      text_color?: string | null;
+      text_x?: number | null;
+      text_y?: number | null;
+      text_scale?: number | null;
       duration_hours?: number | null;
     };
     const restaurant = await prisma.restaurant.findUnique({ where: { id: body.restaurant_id } });
@@ -225,6 +230,10 @@ adminRouter.post(
         media_url: body.media_url,
         media_type: body.media_type,
         text: body.text ?? null,
+        text_color: body.text_color ?? null,
+        text_x: body.text_x ?? null,
+        text_y: body.text_y ?? null,
+        text_scale: body.text_scale ?? null,
         expires_at:
           body.duration_hours != null
             ? new Date(Date.now() + body.duration_hours * 3_600_000)
@@ -234,6 +243,7 @@ adminRouter.post(
       include: storyInclude,
     });
     res.status(201).json(story);
+    broadcast('stories:changed', { action: 'created', id: story.id });
   }),
 );
 
@@ -258,6 +268,10 @@ adminRouter.put(
     if (!existing) throw ApiError.notFound('Story introuvable');
     const body = req.validated?.body as {
       text?: string | null;
+      text_color?: string | null;
+      text_x?: number | null;
+      text_y?: number | null;
+      text_scale?: number | null;
       is_active?: boolean;
       expires_at?: string | null;
     };
@@ -265,6 +279,10 @@ adminRouter.put(
       where: { id: existing.id },
       data: {
         ...(body.text !== undefined ? { text: body.text } : {}),
+        ...(body.text_color !== undefined ? { text_color: body.text_color } : {}),
+        ...(body.text_x !== undefined ? { text_x: body.text_x } : {}),
+        ...(body.text_y !== undefined ? { text_y: body.text_y } : {}),
+        ...(body.text_scale !== undefined ? { text_scale: body.text_scale } : {}),
         ...(body.is_active !== undefined ? { is_active: body.is_active } : {}),
         ...(body.expires_at !== undefined
           ? { expires_at: body.expires_at ? new Date(body.expires_at) : null }
@@ -273,6 +291,7 @@ adminRouter.put(
       include: storyInclude,
     });
     res.json(story);
+    broadcast('stories:changed', { action: 'updated', id: story.id });
   }),
 );
 
@@ -284,6 +303,7 @@ adminRouter.delete(
     if (!existing) throw ApiError.notFound('Story introuvable');
     await prisma.story.delete({ where: { id: existing.id } });
     res.status(204).send();
+    broadcast('stories:changed', { action: 'deleted', id: existing.id });
   }),
 );
 

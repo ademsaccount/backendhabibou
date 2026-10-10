@@ -8,10 +8,8 @@ import { uploadBuffer } from '../lib/upload';
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 },
+  limits: { fileSize: 5 * 1024 * 1024 },
 });
-
-const STORY_VIDEO_MIMES = ['video/mp4', 'video/quicktime', 'video/webm', 'video/x-m4v'];
 
 export const notificationRouter = Router();
 notificationRouter.use(requireAuth);
@@ -59,10 +57,8 @@ uploadRouter.post(
     if (!req.file) throw ApiError.badRequest('Fichier manquant (champ "file")', 'FILE_REQUIRED');
     const folder = typeof req.query.folder === 'string' ? req.query.folder : 'misc';
     const safeFolder = folder.replace(/[^a-z0-9_-]/gi, '');
-    const isImage = req.file.mimetype.startsWith('image/');
-    const isStoryVideo = safeFolder === 'stories' && STORY_VIDEO_MIMES.includes(req.file.mimetype);
-    if (!isImage && !isStoryVideo) {
-      throw ApiError.badRequest('Seuls les images (et vidéos pour les stories) sont acceptees', 'INVALID_FILE_TYPE');
+    if (!req.file.mimetype.startsWith('image/')) {
+      throw ApiError.badRequest('Seuls les images sont acceptees', 'INVALID_FILE_TYPE');
     }
     const start = process.hrtime.bigint();
     logger.info(
