@@ -3,10 +3,12 @@ import { prisma } from '../lib/prisma';
 import { ApiError, asyncHandler } from '../lib/errors';
 import { requireAuth, requireRole } from '../middleware/auth';
 import { validate } from '../middleware/validate';
-import { createCustomRequestSchema, customRequestStatusFilterQuery, idParam, quoteSchema } from '../schemas';
-import { notify, notifyAdmins } from '../lib/notify';
-import { pushCustomQuoteToUser } from '../lib/push';
-import { emitToAdmins, emitToUser } from '../socket/io';
+import { createCustomRequestSchema, customRequestStatusFilterQuery, idParam } from '../schemas';
+import { notifyAdmins } from '../lib/notify';
+import { pushAdmins } from '../lib/push';
+import { emitToAdmins } from '../socket/io';
+import { changeOrderStatus, deliveryFee } from '../services/order.service';
+import { orderInclude } from './order.routes';
 
 const includeCR = {
   address: true,
@@ -16,6 +18,11 @@ const includeCR = {
 export const customRequestRouter = Router();
 customRequestRouter.use(requireAuth, requireRole('client'));
 
+/**
+ * Demande spécifique : texte + photo éventuelle. Crée immédiatement la demande
+ * ET sa commande (pending, livraison seule) — l'admin la reçoit comme une
+ * commande, avec le même appel entrant (titre "demande personnalisée").
+ */
 customRequestRouter.post(
   '/',
   validate(createCustomRequestSchema),
@@ -23,25 +30,62 @@ customRequestRouter.post(
     const body = req.validated?.body as {
       description_text: string;
       photo_url?: string;
-      estimated_budget?: number;
       address_id: string;
     };
     const address = await prisma.address.findUnique({ where: { id: body.address_id } });
     if (!address || address.user_id !== req.user!.id) throw ApiError.notFound('Adresse introuvable');
 
-    const cr = await prisma.customRequest.create({
-      data: { ...body, user_id: req.user!.id },
-      include: includeCR,
+    const fee = deliveryFee();
+    const { cr, order } = await prisma.$transaction(async (tx) => {
+      const created = await tx.customRequest.create({
+        data: {
+          description_text: body.description_text,
+          photo_url: body.photo_url,
+          address_id: body.address_id,
+          user_id: req.user!.id,
+        },
+        include: includeCR,
+      });
+      const createdOrder = await tx.order.create({
+        data: {
+          user_id: req.user!.id,
+          custom_request_id: created.id,
+          address_id: body.address_id,
+          payment_method: 'cash',
+          delivery_fee: fee,
+          total_price: fee,
+        },
+        include: orderInclude,
+      });
+      return { cr: created, order: createdOrder };
     });
 
     await notifyAdmins(
-      'Nouvelle demande libre',
+      'Nouvelle demande personnalisée',
       `${req.user!.full_name} : ${cr.description_text.slice(0, 80)}`,
       'custom_request',
-      { custom_request_id: cr.id },
+      { custom_request_id: cr.id, order_id: order.id },
     );
-    emitToAdmins('notification:new', { type: 'custom_request', custom_request_id: cr.id });
-    res.status(201).json(cr);
+    // Même appel entrant que les commandes (titre "demande personnalisée" côté admin).
+    emitToAdmins('order:incoming', {
+      order_id: order.id,
+      custom_request_id: cr.id,
+      restaurant: null,
+      total_price: order.total_price,
+      items_count: 0,
+      payment_method: order.payment_method,
+      url: `/admin/incoming?order_id=${order.id}`,
+      created_at: order.created_at.toISOString(),
+    });
+    void pushAdmins({
+      title: 'Nouvelle demande personnalisée',
+      body: `${req.user!.full_name} : ${cr.description_text.slice(0, 80)}`,
+      channelId: 'incoming_order',
+      sound: 'incoming_order.wav',
+      data: { type: 'order_incoming', order_id: order.id, url: `/admin/incoming?order_id=${order.id}` },
+    });
+
+    res.status(201).json({ custom_request: cr, order });
   }),
 );
 
@@ -67,53 +111,6 @@ customRequestRouter.get(
   }),
 );
 
-customRequestRouter.post(
-  '/:id/accept',
-  validate({ params: idParam }),
-  asyncHandler(async (req, res) => {
-    const cr = await prisma.customRequest.findUnique({ where: { id: req.params.id } });
-    if (!cr || cr.user_id !== req.user!.id) throw ApiError.notFound('Demande introuvable');
-    if (cr.status !== 'quoted' || cr.admin_quote_price == null) {
-      throw ApiError.badRequest('Aucun devis a accepter', 'NOT_QUOTED');
-    }
-    const updated = await prisma.customRequest.update({
-      where: { id: cr.id },
-      data: { status: 'accepted' },
-      include: includeCR,
-    });
-    await notifyAdmins('Devis accepte', `Demande ${cr.id.slice(0, 8)} acceptee`, 'custom_request', {
-      custom_request_id: cr.id,
-    });
-    res.json(updated);
-  }),
-);
-
-customRequestRouter.post(
-  '/:id/reject',
-  validate({ params: idParam }),
-  asyncHandler(async (req, res) => {
-    const cr = await prisma.customRequest.findUnique({ where: { id: req.params.id } });
-    if (!cr || cr.user_id !== req.user!.id) throw ApiError.notFound('Demande introuvable');
-    if (cr.status !== 'quoted') throw ApiError.badRequest('Aucun devis a refuser', 'NOT_QUOTED');
-    const updated = await prisma.customRequest.update({
-      where: { id: cr.id },
-      data: { status: 'rejected' },
-      include: includeCR,
-    });
-    await notify({
-      user_id: req.user!.id,
-      title: 'Devis refuse',
-      body: 'Vous avez refuse le devis propose',
-      type: 'custom_request',
-      data: { custom_request_id: cr.id },
-    });
-    await notifyAdmins('Devis refuse', `Demande ${cr.id.slice(0, 8)} refusee`, 'custom_request', {
-      custom_request_id: cr.id,
-    });
-    res.json(updated);
-  }),
-);
-
 export const adminCustomRequestRouter = Router();
 adminCustomRequestRouter.use(requireAuth, requireRole('admin'));
 
@@ -133,42 +130,6 @@ adminCustomRequestRouter.get(
 );
 
 adminCustomRequestRouter.put(
-  '/:id/quote',
-  validate(quoteSchema),
-  asyncHandler(async (req, res) => {
-    const { admin_quote_price } = req.validated?.body as { admin_quote_price: number };
-    const cr = await prisma.customRequest.findUnique({ where: { id: req.params.id } });
-    if (!cr) throw ApiError.notFound('Demande introuvable');
-    if (cr.status === 'accepted' || cr.status === 'rejected') {
-      throw ApiError.badRequest('Demande deja clos', 'REQUEST_CLOSED');
-    }
-
-    const updated = await prisma.customRequest.update({
-      where: { id: cr.id },
-      data: { admin_quote_price, status: 'quoted' },
-      include: includeCR,
-    });
-
-    const payload = { custom_request_id: updated.id, admin_quote_price, status: updated.status };
-    emitToUser(cr.user_id, 'custom_request:quoted', payload);
-    await notify({
-      user_id: cr.user_id,
-      title: 'Devis recu',
-      body: `Prix propose : ${admin_quote_price.toFixed(2)} MAD`,
-      type: 'custom_request',
-      data: { custom_request_id: updated.id },
-    });
-    // Push client (devis recu) — apres la mise a jour, best effort.
-    try {
-      await pushCustomQuoteToUser(cr.user_id, updated.id, admin_quote_price);
-    } catch (err) {
-      void err;
-    }
-    res.json(updated);
-  }),
-);
-
-adminCustomRequestRouter.put(
   '/:id/reject',
   validate({ params: idParam }),
   asyncHandler(async (req, res) => {
@@ -179,13 +140,15 @@ adminCustomRequestRouter.put(
       data: { status: 'rejected', admin_quote_price: null },
       include: includeCR,
     });
-    await notify({
-      user_id: cr.user_id,
-      title: 'Demande refusee',
-      body: 'Votre demande libre a ete refusee par notre equipe',
-      type: 'custom_request',
-      data: { custom_request_id: updated.id },
-    });
+    // La commande liée (créée à la demande) est annulée : notifs + push + socket via le service.
+    const linked = await prisma.order.findUnique({ where: { custom_request_id: cr.id } });
+    if (linked && linked.status === 'pending') {
+      await changeOrderStatus(linked, 'cancelled', { actorRole: 'admin', actorUserId: req.user!.id });
+    } else {
+      await notifyAdmins('Demande refusee', `Demande ${cr.id.slice(0, 8)} refusee`, 'custom_request', {
+        custom_request_id: updated.id,
+      });
+    }
     res.json(updated);
   }),
 );

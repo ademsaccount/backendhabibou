@@ -15,6 +15,7 @@ import {
   createStorySchema,
   createSupplementSchema,
   idParam,
+  orderMessageSchema,
   adminOrderStatusSchema,
   orderStatusFilterQuery,
   updateMedicationCategorySchema,
@@ -38,7 +39,9 @@ import { changeOrderStatus } from '../services/order.service';
 // import { haversineKm, roundKm } from '../lib/geo';
 // --- FIN DÉSACTIVÉ ---
 import { orderInclude } from './order.routes';
-import { broadcast } from '../socket/io';
+import { broadcast, emitToOrder } from '../socket/io';
+import { notify } from '../lib/notify';
+import { pushNewMessageToUser } from '../lib/push';
 import type { Prisma } from '@prisma/client';
 
 type ProductBody = {
@@ -121,6 +124,27 @@ adminRouter.get(
       active_orders: activeOrders,
       total_restaurants: totalRestaurants,
     });
+  }),
+);
+
+/* ---------------- Stats ---------------- */
+
+adminRouter.get(
+  '/stats/revenue',
+  asyncHandler(async (req, res) => {
+    const days = Math.min(31, Math.max(1, Math.floor(Number(req.query.days ?? 7)) || 7));
+    // Jours calendaires de Tunis (pas UTC) : commandes annulées exclues.
+    const rows = await prisma.$queryRaw<{ day: string; total: number; count: bigint }[]>`
+      SELECT TO_CHAR(DATE_TRUNC('day', "created_at" AT TIME ZONE 'Africa/Tunis'), 'YYYY-MM-DD') AS day,
+             COALESCE(SUM("total_price"), 0) AS total,
+             COUNT(*) AS count
+      FROM "Order"
+      WHERE "created_at" >= (NOW() - (${days} || ' days')::INTERVAL)
+        AND "status" <> 'cancelled'
+      GROUP BY 1
+      ORDER BY 1 ASC
+    `;
+    res.json(rows.map((r) => ({ day: r.day, total: Number(r.total), count: Number(r.count) })));
   }),
 );
 
@@ -569,6 +593,73 @@ adminRouter.put(
     if (!order) throw ApiError.notFound('Commande introuvable');
     const updated = await changeOrderStatus(order, status, { actorRole: 'admin', actorUserId: req.user!.id });
     res.json(updated);
+  }),
+);
+
+adminRouter.get(
+  '/orders/:id/messages',
+  validate({ params: idParam }),
+  asyncHandler(async (req, res) => {
+    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+    if (!order) throw ApiError.notFound('Commande introuvable');
+    const messages = await prisma.orderMessage.findMany({
+      where: { order_id: order.id },
+      orderBy: { created_at: 'asc' },
+      take: 200,
+    });
+    res.json(messages);
+  }),
+);
+
+adminRouter.post(
+  '/orders/:id/messages',
+  validate(orderMessageSchema),
+  asyncHandler(async (req, res) => {
+    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+    if (!order) throw ApiError.notFound('Commande introuvable');
+    if (order.status === 'cancelled' || order.status === 'delivered') {
+      throw ApiError.badRequest('Discussion fermee', 'CHAT_CLOSED');
+    }
+    const body = req.validated?.body as { kind: 'text' | 'price'; text?: string; price?: number };
+    const message = await prisma.orderMessage.create({
+      data: {
+        order_id: order.id,
+        sender_id: req.user!.id,
+        sender_role: 'admin',
+        kind: body.kind,
+        text: body.kind === 'text' ? body.text! : (body.text ?? null),
+        price: body.kind === 'price' ? body.price! : null,
+      },
+    });
+    if (body.kind === 'price') {
+      await prisma.order.update({
+        where: { id: order.id },
+        data: { proposed_price: body.price!, price_status: 'proposed' },
+      });
+      emitToOrder(order.id, 'order:price_update', {
+        order_id: order.id,
+        price_status: 'proposed',
+        proposed_price: body.price!,
+      });
+    }
+    emitToOrder(order.id, 'order:message:new', { message });
+    const preview =
+      body.kind === 'price' && body.price != null
+        ? `Prix propose : ${body.price.toFixed(2)} MAD`
+        : (body.text ?? '').slice(0, 80);
+    await notify({
+      user_id: order.user_id,
+      title: 'Nouveau message',
+      body: preview,
+      type: 'order',
+      data: { order_id: order.id },
+    });
+    try {
+      await pushNewMessageToUser(order.user_id, order.id, preview);
+    } catch (err) {
+      void err;
+    }
+    res.status(201).json(message);
   }),
 );
 

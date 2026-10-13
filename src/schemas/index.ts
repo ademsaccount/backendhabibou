@@ -68,47 +68,32 @@ export const updateAddressSchema = z.object({
   }),
 });
 
-/* ------------- Demandes spécifiques ("Demande spécifique" côté client) ------------- */
+/* ------------- Demandes spécifiques (texte + photo -> commande directe) ------------- */
 export const createCustomRequestSchema = z.object({
   body: z.object({
     description_text: z.string().trim().min(5, 'Decrivez votre besoin (5 caracteres min)'),
     photo_url: z.string().min(1).optional(),
-    estimated_budget: z.coerce.number().min(0).optional(),
     address_id: z.string().min(1, 'Adresse requise'),
   }),
 });
 
-export const quoteSchema = z.object({
-  params: idParam,
-  body: z.object({ admin_quote_price: z.coerce.number().positive('Prix positif requis') }),
-});
-// --- FIN DÉSACTIVÉ ---
-
 export const createOrderSchema = z.object({
-  body: z
-    .object({
-      address_id: z.string().min(1, 'Adresse requise'),
-      payment_method: z.enum(['card', 'cash']).default('cash'),
-      // Commande issue d'une "Demande spécifique" acceptée (devis admin).
-      custom_request_id: z.string().optional(),
-      items: z
-        .array(
-          z.object({
-            product_id: z.string().min(1),
-            quantity: z.number().int().min(1).max(50),
-            notes: z.string().max(300).optional(),
-            options: z.unknown().optional(),
-            // Taille choisie (produit à tailles multiples) — distinct des options.
-            size_label: z.string().trim().min(1).max(60).optional(),
-          }),
-        )
-        .min(1)
-        .optional(),
-    })
-    .refine((d) => Boolean(d.custom_request_id) || Boolean(d.items?.length), {
-      message: 'items ou custom_request_id requis',
-      path: ['items'],
-    }),
+  body: z.object({
+    address_id: z.string().min(1, 'Adresse requise'),
+    payment_method: z.enum(['card', 'cash']).default('cash'),
+    items: z
+      .array(
+        z.object({
+          product_id: z.string().min(1),
+          quantity: z.number().int().min(1).max(50),
+          notes: z.string().max(300).optional(),
+          options: z.unknown().optional(),
+          // Taille choisie (produit à tailles multiples) — distinct des options.
+          size_label: z.string().trim().min(1).max(60).optional(),
+        }),
+      )
+      .min(1),
+  }),
 });
 
 export const rateOrderSchema = z.object({
@@ -116,6 +101,30 @@ export const rateOrderSchema = z.object({
   body: z.object({
     rating: z.coerce.number().int().min(1).max(5),
     comment: z.string().trim().max(500).optional(),
+  }),
+});
+
+/** Message de négociation d'une commande (texte libre ou proposition de prix). */
+export const orderMessageSchema = z.object({
+  params: idParam,
+  body: z
+    .object({
+      kind: z.enum(['text', 'price']),
+      text: z.string().trim().min(1).max(1000).optional(),
+      price: z.coerce.number().positive('Prix positif requis').max(100000).optional(),
+    })
+    .refine((d) => (d.kind === 'text' ? !!d.text : d.price != null), {
+      message: 'texte ou prix requis selon le type',
+      path: ['text'],
+    }),
+});
+
+/** Approbation client du prix proposé (reprend le flux normal ensuite). */
+export const approvePriceSchema = z.object({
+  params: idParam,
+  body: z.object({
+    price: z.coerce.number().positive('Prix positif requis').max(100000),
+    payment_method: z.enum(['card', 'cash']).optional(),
   }),
 });
 

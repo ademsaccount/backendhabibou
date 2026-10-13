@@ -53,6 +53,13 @@ enum PaymentStatus {
   refunded
 }
 
+enum PriceStatus {
+  none
+  proposed
+  approved
+  rejected
+}
+
 enum StoryMedia {
   image
   video
@@ -303,6 +310,9 @@ model Order {
   payment_method    PaymentMethod @default(cash)
   payment_status    PaymentStatus @default(pending)
   payment_intent_id String?
+  /** Prix proposé par le livreur (négo demande spécifique) ; total = prix + livraison à l'approbation. */
+  proposed_price    Float?
+  price_status      PriceStatus @default(none)
   address_id        String
   created_at        DateTime      @default(now())
   delivered_at      DateTime?
@@ -313,6 +323,7 @@ model Order {
   livreur        Livreur?       @relation(fields: [livreur_id], references: [id])
   address        Address        @relation(fields: [address_id], references: [id])
   items          OrderItem[]
+  messages       OrderMessage[]
   review         Review?
 
   @@index([status])
@@ -337,6 +348,24 @@ model OrderItem {
   product Product @relation(fields: [product_id], references: [id])
 
   @@index([order_id])
+}
+
+/** Message de négociation d'une commande (texte libre ou proposition de prix). */
+model OrderMessage {
+  id          String   @id @default(uuid())
+  order_id    String
+  sender_id   String
+  /** 'client' | 'admin'. */
+  sender_role String
+  /** 'text' | 'price'. */
+  kind        String
+  text        String?
+  price       Float?
+  created_at  DateTime @default(now())
+
+  order Order @relation(fields: [order_id], references: [id], onDelete: Cascade)
+
+  @@index([order_id, created_at])
 }
 
 model Livreur {

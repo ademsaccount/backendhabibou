@@ -229,24 +229,19 @@ export async function pushOrderStatusToUser(
   });
 }
 
-/** Push au client : devis de demande custom recu. Best effort. */
-export async function pushCustomQuoteToUser(
+/** Push au client : nouveau message de négociation sur sa commande. Best effort. */
+export async function pushNewMessageToUser(
   userId: string,
-  customRequestId: string,
-  price: number,
+  orderId: string,
+  preview: string,
 ): Promise<void> {
-  const amount = price.toFixed(2);
   await pushToUser(userId, {
     templates: {
-      fr: { title: 'Devis reçu', body: `Prix proposé : ${amount} MAD` },
-      en: { title: 'Quote received', body: `Proposed price: ${amount} MAD` },
-      ar: { title: 'وصل عرض السعر', body: `السعر المقترح: ${amount} MAD` },
+      fr: { title: 'Nouveau message', body: preview },
+      en: { title: 'New message', body: preview },
+      ar: { title: 'رسالة جديدة', body: preview },
     },
     channelId: ORDERS_CHANNEL_ID,
-    data: {
-      type: 'custom_quote',
-      custom_request_id: customRequestId,
-      url: `/request/${customRequestId}`,
-    },
+    data: { type: 'order_message', order_id: orderId, url: `/order/${orderId}` },
   });
 }

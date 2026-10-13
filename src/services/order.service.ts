@@ -99,6 +99,14 @@ export async function changeOrderStatus(
 
   const payload = { order_id: updated.id, status: updated.status, label: STATUS_LABELS[to] };
   emitToOrder(updated.id, 'order:status_update', payload);
+
+  // Demande spécifique liée : son statut suit celui de la commande.
+  if (updated.custom_request_id && (to === 'confirmed' || to === 'cancelled')) {
+    await prisma.customRequest.update({
+      where: { id: updated.custom_request_id },
+      data: { status: to === 'confirmed' ? 'accepted' : 'rejected' },
+    });
+  }
   await notify({
     user_id: updated.user_id,
     title: 'Commande mise a jour',

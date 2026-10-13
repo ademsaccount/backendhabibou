@@ -3,12 +3,12 @@ import { prisma } from '../lib/prisma';
 import { ApiError, asyncHandler } from '../lib/errors';
 import { requireAuth, requireRole } from '../middleware/auth';
 import { validate } from '../middleware/validate';
-import { createOrderSchema, idParam, orderStatusFilterQuery, rateOrderSchema } from '../schemas';
+import { createOrderSchema, idParam, orderMessageSchema, approvePriceSchema, orderStatusFilterQuery, rateOrderSchema } from '../schemas';
 import { deliveryFee } from '../services/order.service';
 import { isOpenNow } from '../lib/open';
 import { notify, notifyAdmins } from '../lib/notify';
-import { pushAdmins, pushOrderStatusToUser } from '../lib/push';
-import { emitToAdmins } from '../socket/io';
+import { pushAdmins, pushNewMessageToUser, pushOrderStatusToUser } from '../lib/push';
+import { emitToAdmins, emitToOrder } from '../socket/io';
 import { createPaymentIntent, stripeEnabled } from '../lib/stripe';
 import type { Prisma } from '@prisma/client';
 
@@ -103,9 +103,7 @@ orderRouter.post(
     const body = req.validated?.body as {
       address_id: string;
       payment_method: 'card' | 'cash';
-      // Commande issue d'une "Demande spécifique" (devis admin accepté).
-      custom_request_id?: string;
-      items?: { product_id: string; quantity: number; notes?: string; options?: unknown; size_label?: string }[];
+      items: { product_id: string; quantity: number; notes?: string; options?: unknown; size_label?: string }[];
     };
 
     const address = await prisma.address.findUnique({ where: { id: body.address_id } });
@@ -114,29 +112,6 @@ orderRouter.post(
     const fee = deliveryFee();
 
     const order = await prisma.$transaction(async (tx) => {
-      if (body.custom_request_id) {
-        const cr = await tx.customRequest.findUnique({ where: { id: body.custom_request_id } });
-        if (!cr || cr.user_id !== userId) throw ApiError.notFound('Demande introuvable');
-        if (cr.status !== 'accepted' || cr.admin_quote_price == null) {
-          throw ApiError.badRequest('Devis non accepte', 'REQUEST_NOT_ACCEPTED');
-        }
-        const existing = await tx.order.findUnique({ where: { custom_request_id: cr.id } });
-        if (existing) throw ApiError.conflict('Commande deja creee pour cette demande', 'ORDER_EXISTS');
-
-        const created = await tx.order.create({
-          data: {
-            user_id: userId,
-            custom_request_id: cr.id,
-            address_id: body.address_id,
-            payment_method: body.payment_method,
-            total_price: cr.admin_quote_price + fee,
-            delivery_fee: fee,
-          },
-          include: orderInclude,
-        });
-        return created;
-      }
-
       const items = body.items ?? [];
       if (items.length === 0) throw ApiError.badRequest('Panier vide', 'EMPTY_CART');
 
@@ -315,6 +290,123 @@ orderRouter.post(
     });
 
     res.status(201).json(review);
+  }),
+);
+
+/* ------------- Négociation (demandes spécifiques) : messages + prix ------------- */
+
+async function getOwnOrderOrThrow(orderId: string, userId: string) {
+  const order = await prisma.order.findUnique({ where: { id: orderId } });
+  if (!order || order.user_id !== userId) throw ApiError.notFound('Commande introuvable');
+  return order;
+}
+
+function assertChatOpen(status: string) {
+  if (status === 'cancelled' || status === 'delivered') {
+    throw ApiError.badRequest('Discussion fermee', 'CHAT_CLOSED');
+  }
+}
+
+orderRouter.get(
+  '/:id/messages',
+  validate({ params: idParam }),
+  asyncHandler(async (req, res) => {
+    const order = await getOwnOrderOrThrow(req.params.id, req.user!.id);
+    const messages = await prisma.orderMessage.findMany({
+      where: { order_id: order.id },
+      orderBy: { created_at: 'asc' },
+      take: 200,
+    });
+    res.json(messages);
+  }),
+);
+
+orderRouter.post(
+  '/:id/messages',
+  validate(orderMessageSchema),
+  asyncHandler(async (req, res) => {
+    const order = await getOwnOrderOrThrow(req.params.id, req.user!.id);
+    assertChatOpen(order.status);
+    const body = req.validated?.body as { kind: 'text' | 'price'; text?: string; price?: number };
+    if (body.kind === 'price') {
+      throw ApiError.forbidden('Seul le livreur propose un prix', 'PRICE_FORBIDDEN');
+    }
+    const message = await prisma.orderMessage.create({
+      data: {
+        order_id: order.id,
+        sender_id: req.user!.id,
+        sender_role: 'client',
+        kind: 'text',
+        text: body.text!,
+      },
+    });
+    emitToOrder(order.id, 'order:message:new', { message });
+    await notifyAdmins(
+      'Nouveau message client',
+      (body.text ?? '').slice(0, 80),
+      'order',
+      { order_id: order.id },
+    );
+    void pushAdmins({
+      title: 'Nouveau message client',
+      body: (body.text ?? '').slice(0, 80),
+      data: { type: 'order_message', order_id: order.id, url: `/admin/orders/${order.id}` },
+    });
+    res.status(201).json(message);
+  }),
+);
+
+orderRouter.post(
+  '/:id/approve-price',
+  validate(approvePriceSchema),
+  asyncHandler(async (req, res) => {
+    const order = await getOwnOrderOrThrow(req.params.id, req.user!.id);
+    const body = req.validated?.body as { price: number; payment_method?: 'card' | 'cash' };
+    if (order.price_status !== 'proposed' || order.proposed_price == null) {
+      throw ApiError.badRequest('Aucune proposition a approuver', 'NO_PROPOSAL');
+    }
+    if (Math.abs(body.price - order.proposed_price) > 0.001) {
+      throw ApiError.badRequest('Le prix a change', 'PRICE_MISMATCH');
+    }
+    const updated = await prisma.order.update({
+      where: { id: order.id },
+      data: {
+        total_price: body.price + order.delivery_fee,
+        price_status: 'approved',
+        ...(body.payment_method ? { payment_method: body.payment_method } : {}),
+      },
+      include: orderInclude,
+    });
+    emitToOrder(order.id, 'order:price_update', {
+      order_id: order.id,
+      price_status: 'approved',
+      total_price: updated.total_price,
+    });
+    await notifyAdmins('Prix approuve', `Commande ${order.id.slice(0, 8)} : prix accepte`, 'order', {
+      order_id: order.id,
+    });
+    res.json(updated);
+  }),
+);
+
+orderRouter.post(
+  '/:id/reject-price',
+  validate({ params: idParam }),
+  asyncHandler(async (req, res) => {
+    const order = await getOwnOrderOrThrow(req.params.id, req.user!.id);
+    if (order.price_status !== 'proposed' || order.proposed_price == null) {
+      throw ApiError.badRequest('Aucune proposition a refuser', 'NO_PROPOSAL');
+    }
+    const updated = await prisma.order.update({
+      where: { id: order.id },
+      data: { price_status: 'rejected' },
+      include: orderInclude,
+    });
+    emitToOrder(order.id, 'order:price_update', { order_id: order.id, price_status: 'rejected' });
+    await notifyAdmins('Prix refuse', `Commande ${order.id.slice(0, 8)} : prix refuse`, 'order', {
+      order_id: order.id,
+    });
+    res.json(updated);
   }),
 );
 

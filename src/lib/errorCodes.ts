@@ -66,6 +66,11 @@ export const ERROR_CODES = [
   'NOT_QUOTED',
   'REQUEST_CLOSED',
   'REQUEST_NOT_ACCEPTED',
+  // négociation prix (demandes spécifiques)
+  'NO_PROPOSAL',
+  'PRICE_MISMATCH',
+  'PRICE_FORBIDDEN',
+  'CHAT_CLOSED',
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];
