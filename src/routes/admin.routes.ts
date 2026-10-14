@@ -1,14 +1,12 @@
 import { Router } from 'express';
+import bcrypt from 'bcryptjs';
 import { prisma } from '../lib/prisma';
 import { ApiError, asyncHandler } from '../lib/errors';
 import { requireAuth, requireRole } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import {
-  // --- DÉSACTIVÉ : gestion de plusieurs livreurs (l'admin fait office de livreur unique) ---
-  // assignSchema,
-  // updateLivreurSchema,
-  // --- FIN DÉSACTIVÉ ---
   createIngredientSchema,
+  createLivreurSchema,
   createMedicationCategorySchema,
   createProductSchema,
   createRestaurantSchema,
@@ -18,6 +16,7 @@ import {
   orderMessageSchema,
   adminOrderStatusSchema,
   orderStatusFilterQuery,
+  updateLivreurSchema,
   updateMedicationCategorySchema,
   updateProductSchema,
   updateRestaurantSchema,
@@ -39,9 +38,9 @@ import { changeOrderStatus } from '../services/order.service';
 // import { haversineKm, roundKm } from '../lib/geo';
 // --- FIN DÉSACTIVÉ ---
 import { orderInclude } from './order.routes';
-import { broadcast, emitToOrder } from '../socket/io';
-import { notify } from '../lib/notify';
-import { pushNewMessageToUser } from '../lib/push';
+import { broadcast, emitToOrder, emitToUser } from '../socket/io';
+import { notify, notifyAssignedLivreur } from '../lib/notify';
+import { pushNewMessageToUser, pushToUser } from '../lib/push';
 import type { Prisma } from '@prisma/client';
 
 type ProductBody = {
@@ -596,6 +595,52 @@ adminRouter.put(
   }),
 );
 
+/**
+ * Diffusion d'appel : la commande (pending) sonne chez tous les autres livreurs
+ * en ligne. Le premier qui accepte la prend ; les refus n'arrêtent pas les autres ;
+ * si tous refusent, la commande est annulée.
+ */
+adminRouter.post(
+  '/orders/:id/diffuse',
+  validate({ params: idParam }),
+  asyncHandler(async (req, res) => {
+    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+    if (!order) throw ApiError.notFound('Commande introuvable');
+    if (order.status !== 'pending') {
+      throw ApiError.badRequest('Diffusion impossible a ce stade', 'NOT_DIFFUSABLE');
+    }
+    const online = await prisma.livreur.findMany({
+      where: { is_online: true, user_id: { not: req.user!.id }, user: { role: 'livreur' } },
+      select: { user_id: true },
+    });
+    if (online.length === 0) {
+      throw ApiError.badRequest('Aucun livreur en ligne', 'DIFFUSE_EMPTY');
+    }
+    const ids = online.map((l) => l.user_id);
+    const updated = await prisma.order.update({
+      where: { id: order.id },
+      data: { diffused_at: new Date(), diffused_to: ids, rejected_by: [] },
+      include: orderInclude,
+    });
+    for (const userId of ids) {
+      emitToUser(userId, 'order:diffuse', { order_id: order.id });
+    }
+    for (const userId of ids) {
+      void pushToUser(userId, {
+        templates: {
+          fr: { title: 'Nouvel appel', body: `Commande ${order.id.slice(0, 8)} à prendre` },
+          en: { title: 'New call', body: `Order ${order.id.slice(0, 8)} to take` },
+          ar: { title: 'نداء جديد', body: `طلب ${order.id.slice(0, 8)} للاستلام` },
+        },
+        channelId: 'incoming_order',
+        sound: 'incoming_order.wav',
+        data: { type: 'order_incoming', order_id: order.id, url: `/livreur/incoming?order_id=${order.id}` },
+      });
+    }
+    res.json(updated);
+  }),
+);
+
 adminRouter.get(
   '/orders/:id/messages',
   validate({ params: idParam }),
@@ -621,6 +666,9 @@ adminRouter.post(
       throw ApiError.badRequest('Discussion fermee', 'CHAT_CLOSED');
     }
     const body = req.validated?.body as { kind: 'text' | 'price'; text?: string; price?: number };
+    if (body.kind === 'price' && !order.custom_request_id) {
+      throw ApiError.forbidden('Prix réservé aux demandes personnalisées', 'PRICE_FORBIDDEN');
+    }
     const message = await prisma.orderMessage.create({
       data: {
         order_id: order.id,
@@ -659,6 +707,7 @@ adminRouter.post(
     } catch (err) {
       void err;
     }
+    await notifyAssignedLivreur(order, req.user!.id, preview);
     res.status(201).json(message);
   }),
 );
@@ -675,56 +724,145 @@ adminRouter.post(
 // );
 // --- FIN DÉSACTIVÉ ---
 
-/* ---------------- Livreurs ---------------- */
-// --- DÉSACTIVÉ : gestion de plusieurs livreurs (l'admin fait office de livreur unique) ---
-// adminRouter.get(
-//   '/livreurs',
-//   asyncHandler(async (_req, res) => {
-//     const livreurs = await prisma.livreur.findMany({ include: livreurInclude, orderBy: { created_at: 'desc' } });
-//     const activeCounts = await prisma.order.groupBy({
-//       by: ['livreur_id'],
-//       where: { livreur_id: { not: null }, status: { in: ['confirmed', 'preparing', 'picked_up', 'on_the_way'] } },
-//       _count: { _all: true },
-//     });
-//     res.json(
-//       livreurs.map((l) => ({
-//         ...l,
-//         active_orders: activeCounts.find((c) => c.livreur_id === l.id)?._count._all ?? 0,
-//       })),
-//     );
-//   }),
-// );
+/* ---------------- Livreurs (gérés par l'admin top) ---------------- */
 
-// adminRouter.put(
-//   '/livreurs/:id',
-//   validate(updateLivreurSchema),
-//   asyncHandler(async (req, res) => {
-//     const existing = await prisma.livreur.findUnique({ where: { user_id: req.params.id } });
-//     if (!existing) throw ApiError.notFound('Livreur introuvable');
-//     const body = req.validated?.body as Record<string, unknown>;
-//     const livreur = await prisma.livreur.update({ where: { id: existing.id }, data: body, include: livreurInclude });
-//     res.json(livreur);
-//   }),
-// );
+const livreurUserSelect = {
+  id: true,
+  email: true,
+  full_name: true,
+  phone: true,
+  avatar_url: true,
+  role: true,
+  created_at: true,
+} as const;
 
-// adminRouter.get(
-//   '/livreurs/map',
-//   asyncHandler(async (req, res) => {
-//     const lat = Number(req.query.lat);
-//     const lng = Number(req.query.lng);
-//     const livreurs = await prisma.livreur.findMany({
-//       where: { current_lat: { not: null }, current_lng: { not: null } },
-//       include: { user: { select: { id: true, full_name: true, phone: true } } },
-//     });
-//     res.json(
-//       livreurs.map((l) => ({
-//         ...l,
-//         distance_km:
-//           Number.isFinite(lat) && Number.isFinite(lng)
-//             ? roundKm(haversineKm(lat, lng, l.current_lat!, l.current_lng!))
-//             : null,
-//       })),
-//     );
-//   }),
-// );
-// --- FIN DÉSACTIVÉ ---
+adminRouter.get(
+  '/livreurs',
+  asyncHandler(async (_req, res) => {
+    const users = await prisma.user.findMany({
+      where: { role: 'livreur' },
+      select: { ...livreurUserSelect, livreur: true },
+      orderBy: { created_at: 'desc' },
+    });
+    const activeCounts = await prisma.order.groupBy({
+      by: ['livreur_id'],
+      where: { livreur_id: { not: null }, status: { in: ['confirmed', 'preparing', 'picked_up', 'on_the_way'] } },
+      _count: { _all: true },
+    });
+    res.json(
+      users.map((u) => ({
+        ...u,
+        active_orders: activeCounts.find((c) => c.livreur_id === u.livreur?.id)?._count._all ?? 0,
+      })),
+    );
+  }),
+);
+
+adminRouter.get(
+  '/livreurs/online-count',
+  asyncHandler(async (_req, res) => {
+    const count = await prisma.livreur.count({
+      where: { is_online: true, user: { role: 'livreur' } },
+    });
+    res.json({ count });
+  }),
+);
+
+adminRouter.post(
+  '/livreurs',
+  validate(createLivreurSchema),
+  asyncHandler(async (req, res) => {
+    const body = req.validated?.body as {
+      email: string;
+      password: string;
+      full_name: string;
+      phone?: string;
+      avatar_url?: string | null;
+      vehicle_type?: string;
+    };
+    const existing = await prisma.user.findUnique({ where: { email: body.email } });
+    if (existing) throw ApiError.conflict('Un compte existe deja avec cet email', 'EMAIL_TAKEN');
+    const created = await prisma.$transaction(async (tx) => {
+      const user = await tx.user.create({
+        data: {
+          email: body.email,
+          password_hash: await bcrypt.hash(body.password, 10),
+          full_name: body.full_name,
+          phone: body.phone ?? null,
+          avatar_url: body.avatar_url ?? null,
+          role: 'livreur',
+        },
+        select: livreurUserSelect,
+      });
+      const livreur = await tx.livreur.create({
+        data: { user_id: user.id, vehicle_type: body.vehicle_type ?? 'moto' },
+      });
+      return { ...user, livreur };
+    });
+    res.status(201).json(created);
+  }),
+);
+
+adminRouter.put(
+  '/livreurs/:id',
+  validate(updateLivreurSchema),
+  asyncHandler(async (req, res) => {
+    const body = req.validated?.body as {
+      full_name?: string;
+      phone?: string | null;
+      avatar_url?: string | null;
+      vehicle_type?: string;
+      role?: 'livreur' | 'client';
+    };
+    const existing = await prisma.user.findUnique({
+      where: { id: req.params.id },
+      include: { livreur: true },
+    });
+    if (!existing) throw ApiError.notFound('Livreur introuvable');
+    const updated = await prisma.$transaction(async (tx) => {
+      const user = await tx.user.update({
+        where: { id: existing.id },
+        data: {
+          ...(body.full_name !== undefined ? { full_name: body.full_name } : {}),
+          ...(body.phone !== undefined ? { phone: body.phone } : {}),
+          ...(body.avatar_url !== undefined ? { avatar_url: body.avatar_url } : {}),
+          ...(body.role !== undefined ? { role: body.role } : {}),
+        },
+        select: livreurUserSelect,
+      });
+      let livreur = existing.livreur;
+      if (body.role === 'livreur' || (body.role === undefined && (existing.role as string) === 'livreur')) {
+        livreur = await tx.livreur.upsert({
+          where: { user_id: existing.id },
+          update: body.vehicle_type !== undefined ? { vehicle_type: body.vehicle_type } : {},
+          create: { user_id: existing.id, vehicle_type: body.vehicle_type ?? 'moto' },
+        });
+      } else if (body.vehicle_type !== undefined && livreur) {
+        livreur = await tx.livreur.update({
+          where: { id: livreur.id },
+          data: { vehicle_type: body.vehicle_type },
+        });
+      }
+      return { ...user, livreur };
+    });
+    res.json(updated);
+  }),
+);
+
+adminRouter.delete(
+  '/livreurs/:id',
+  validate({ params: idParam }),
+  asyncHandler(async (req, res) => {
+    const existing = await prisma.user.findUnique({ where: { id: req.params.id } });
+    if (!existing) throw ApiError.notFound('Livreur introuvable');
+    try {
+      await prisma.$transaction(async (tx) => {
+        await tx.livreur.deleteMany({ where: { user_id: existing.id } });
+        await tx.user.delete({ where: { id: existing.id } });
+      });
+    } catch {
+      throw ApiError.conflict('Livreur avec historique : désactivez-le plutôt', 'HAS_ORDERS');
+    }
+    res.status(204).send();
+  }),
+);

@@ -6,7 +6,7 @@ import { validate } from '../middleware/validate';
 import { createOrderSchema, idParam, orderMessageSchema, approvePriceSchema, orderStatusFilterQuery, rateOrderSchema } from '../schemas';
 import { deliveryFee } from '../services/order.service';
 import { isOpenNow } from '../lib/open';
-import { notify, notifyAdmins } from '../lib/notify';
+import { notify, notifyAdmins, notifyAssignedLivreur } from '../lib/notify';
 import { pushAdmins, pushNewMessageToUser, pushOrderStatusToUser } from '../lib/push';
 import { emitToAdmins, emitToOrder } from '../socket/io';
 import { createPaymentIntent, stripeEnabled } from '../lib/stripe';
@@ -352,6 +352,7 @@ orderRouter.post(
       body: (body.text ?? '').slice(0, 80),
       data: { type: 'order_message', order_id: order.id, url: `/admin/orders/${order.id}` },
     });
+    await notifyAssignedLivreur(order, req.user!.id, (body.text ?? '').slice(0, 80));
     res.status(201).json(message);
   }),
 );

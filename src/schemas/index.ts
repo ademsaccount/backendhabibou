@@ -68,6 +68,28 @@ export const updateAddressSchema = z.object({
   }),
 });
 
+/** Profil : l'utilisateur modifie ses propres nom / téléphone / avatar (+ véhicule livreur). */
+export const updateMeSchema = z.object({
+  body: z.object({
+    full_name: z.string().trim().min(2).optional(),
+    phone: z.string().trim().min(6).nullable().optional(),
+    avatar_url: z.string().min(1).nullable().optional(),
+    vehicle_type: z.string().trim().min(2).max(30).optional(),
+  }),
+});
+
+/** Création d'un compte livreur par l'admin top. */
+export const createLivreurSchema = z.object({
+  body: z.object({
+    email: z.string().trim().toLowerCase().regex(emailRe, 'Email invalide'),
+    password: z.string().min(8, 'Mot de passe : 8 caracteres minimum'),
+    full_name: z.string().trim().min(2, 'Nom complet requis'),
+    phone: z.string().trim().min(6).optional(),
+    avatar_url: z.string().min(1).nullable().optional(),
+    vehicle_type: z.string().trim().min(2).max(30).optional(),
+  }),
+});
+
 /* ------------- Demandes spécifiques (texte + photo -> commande directe) ------------- */
 export const createCustomRequestSchema = z.object({
   body: z.object({
@@ -343,15 +365,17 @@ export const updateMedicationCategorySchema = z.object({
   body: createMedicationCategorySchema.shape.body.partial(),
 });
 
-// --- DÉSACTIVÉ : gestion de plusieurs livreurs (l'admin fait office de livreur unique) ---
+/** Édition d'un livreur par l'admin top (profil + véhicule + activation). */
 export const updateLivreurSchema = z.object({
   params: idParam,
   body: z.object({
-    is_online: z.boolean().optional(),
-    vehicle_type: z.string().trim().min(2).optional(),
+    full_name: z.string().trim().min(2).optional(),
+    phone: z.string().trim().min(6).nullable().optional(),
+    avatar_url: z.string().min(1).nullable().optional(),
+    vehicle_type: z.string().trim().min(2).max(30).optional(),
+    role: z.enum(['livreur', 'client']).optional(),
   }),
 });
-// --- FIN DÉSACTIVÉ ---
 
 /* ------------- Push notifications (app sudo_habichou + habichou) ------------- */
 

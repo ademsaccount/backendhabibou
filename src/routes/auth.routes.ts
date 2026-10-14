@@ -59,13 +59,8 @@ router.post(
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) throw ApiError.unauthorized('Email ou mot de passe incorrect', 'INVALID_CREDENTIALS');
 
-    // --- DÉSACTIVÉ : plus de compte livreur (l'admin fait office de livreur unique) ---
-    // if (user.role === 'livreur') {
-    //   await prisma.livreur.upsert({ where: { user_id: user.id }, update: {}, create: { user_id: user.id } });
-    // }
-    // --- FIN DÉSACTIVÉ ---
     if (user.role === 'livreur') {
-      throw ApiError.forbidden('Les comptes livreur ont ete desactivez. Utilisez le compte admin.', 'ROLE_DISABLED');
+      await prisma.livreur.upsert({ where: { user_id: user.id }, update: {}, create: { user_id: user.id } });
     }
 
     const tokens = await issueTokens(user.id, user.role);

@@ -71,6 +71,11 @@ export const ERROR_CODES = [
   'PRICE_MISMATCH',
   'PRICE_FORBIDDEN',
   'CHAT_CLOSED',
+  // diffusion d'appel aux livreurs
+  'DIFFUSE_EMPTY',
+  'NOT_DIFFUSABLE',
+  'ORDER_TAKEN',
+  'NOT_OFFERED',
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];

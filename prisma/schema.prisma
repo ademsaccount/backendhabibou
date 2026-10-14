@@ -313,6 +313,10 @@ model Order {
   /** Prix proposé par le livreur (négo demande spécifique) ; total = prix + livraison à l'approbation. */
   proposed_price    Float?
   price_status      PriceStatus @default(none)
+  /** Diffusion d'appel : snapshot des livreurs démarchés + refus (tous refusent = annulation). */
+  diffused_at       DateTime?
+  diffused_to       String[]  @default([])
+  rejected_by       String[]  @default([])
   address_id        String
   created_at        DateTime      @default(now())
   delivered_at      DateTime?

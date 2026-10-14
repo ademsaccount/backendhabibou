@@ -63,10 +63,14 @@ export async function changeOrderStatus(
   // }
   // --- FIN DÉSACTIVÉ ---
 
-  // L'admin est l'unique livreur : a la confirmation, la commande lui est affectee
-  // automatiquement (profil Livreur auto-cree) pour le suivi client (nom + carte GPS).
+  // Assignation auto à la confirmation : l'acteur (admin top ou livreur qui
+  // prend la commande) devient le livreur suivi par le client.
   let adminLivreurId: string | null = null;
-  if (to === 'confirmed' && opts.actorRole === 'admin' && opts.actorUserId) {
+  if (
+    to === 'confirmed' &&
+    opts.actorUserId &&
+    (opts.actorRole === 'admin' || opts.actorRole === 'livreur')
+  ) {
     const livreurRecord = await prisma.livreur.upsert({
       where: { user_id: opts.actorUserId },
       update: {},

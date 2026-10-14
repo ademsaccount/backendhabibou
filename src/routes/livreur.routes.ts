@@ -3,9 +3,11 @@ import { prisma } from '../lib/prisma';
 import { ApiError, asyncHandler } from '../lib/errors';
 import { requireAuth, requireRole } from '../middleware/auth';
 import { validate } from '../middleware/validate';
-import { idParam, locationSchema, orderStatusSchema } from '../schemas';
+import { idParam, locationSchema, orderMessageSchema, orderStatusSchema } from '../schemas';
 import { changeOrderStatus } from '../services/order.service';
 import { emitToAdmins, emitToOrder } from '../socket/io';
+import { notify, notifyAdmins } from '../lib/notify';
+import { pushAdmins, pushNewMessageToUser } from '../lib/push';
 import { orderInclude } from './order.routes';
 
 const ACTIVE = ['confirmed', 'preparing', 'picked_up', 'on_the_way'] as const;
@@ -66,7 +68,10 @@ livreurRouter.get(
     const livreur = await getLivreur(req.user!.id);
     const order = await prisma.order.findUnique({ where: { id: req.params.id }, include: orderInclude });
     if (!order) throw ApiError.notFound('Commande introuvable');
-    if (order.livreur_id !== livreur.id) throw ApiError.forbidden();
+    const assigned = order.livreur_id === livreur.id;
+    const offered =
+      order.status === 'pending' && (order.diffused_to ?? []).includes(req.user!.id);
+    if (!assigned && !offered) throw ApiError.forbidden();
     res.json(order);
   }),
 );
@@ -82,6 +87,76 @@ livreurRouter.put(
     if (order.livreur_id !== livreur.id) throw ApiError.forbidden();
     const updated = await changeOrderStatus(order, status, { actorRole: 'livreur' });
     res.json(updated);
+  }),
+);
+
+/**
+ * Accepter un appel diffusé : premier arrivé, premier Servi (atomique).
+ * Perdant → 409 ORDER_TAKEN ; les autres appels se ferment via status_update.
+ */
+livreurRouter.post(
+  '/orders/:id/accept',
+  validate({ params: idParam }),
+  asyncHandler(async (req, res) => {
+    const livreur = await getLivreur(req.user!.id);
+    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+    if (!order) throw ApiError.notFound('Commande introuvable');
+    if (
+      order.status !== 'pending' ||
+      !(order.diffused_to ?? []).includes(req.user!.id) ||
+      (order.rejected_by ?? []).includes(req.user!.id)
+    ) {
+      throw ApiError.forbidden('Appel indisponible', 'NOT_OFFERED');
+    }
+    const claimed = await prisma.order.updateMany({
+      where: { id: order.id, status: 'pending', livreur_id: null },
+      data: { livreur_id: livreur.id },
+    });
+    if (claimed.count === 0) {
+      throw ApiError.conflict('Commande déjà prise par un autre livreur', 'ORDER_TAKEN');
+    }
+    const fresh = await prisma.order.findUnique({ where: { id: order.id } });
+    const updated = await changeOrderStatus(fresh!, 'confirmed', {
+      actorRole: 'livreur',
+      actorUserId: req.user!.id,
+    });
+    res.json(updated);
+  }),
+);
+
+/**
+ * Refuser un appel diffusé : n'arrête pas les autres ; si tous les démarchés
+ * ont refusé, la commande est annulée.
+ */
+livreurRouter.post(
+  '/orders/:id/reject',
+  validate({ params: idParam }),
+  asyncHandler(async (req, res) => {
+    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+    if (!order) throw ApiError.notFound('Commande introuvable');
+    if (
+      order.status !== 'pending' ||
+      !(order.diffused_to ?? []).includes(req.user!.id) ||
+      order.livreur_id != null
+    ) {
+      throw ApiError.forbidden('Appel indisponible', 'NOT_OFFERED');
+    }
+    const rejectedBy = Array.from(new Set([...(order.rejected_by ?? []), req.user!.id]));
+    await prisma.order.update({ where: { id: order.id }, data: { rejected_by: rejectedBy } });
+    const allRejected =
+      (order.diffused_to ?? []).length > 0 &&
+      (order.diffused_to ?? []).every((id) => rejectedBy.includes(id));
+    if (allRejected) {
+      try {
+        const fresh = await prisma.order.findUnique({ where: { id: order.id } });
+        if (fresh && fresh.status === 'pending' && fresh.livreur_id == null) {
+          await changeOrderStatus(fresh, 'cancelled', { actorRole: 'livreur', actorUserId: req.user!.id });
+        }
+      } catch {
+        // Course perdue contre une acceptation concurrente : l'annulation est sans objet.
+      }
+    }
+    res.json({ ok: true });
   }),
 );
 
@@ -133,5 +208,91 @@ livreurRouter.get(
       earnings: deliveredAgg._sum.delivery_fee ?? 0,
       history,
     });
+  }),
+);
+
+async function getAssignedOrderOrThrow(orderId: string, userId: string) {
+  const livreur = await getLivreur(userId);
+  const order = await prisma.order.findUnique({ where: { id: orderId } });
+  if (!order) throw ApiError.notFound('Commande introuvable');
+  if (order.livreur_id !== livreur.id) throw ApiError.forbidden();
+  return order;
+}
+
+function assertChatOpen(status: string) {
+  if (status === 'cancelled' || status === 'delivered') {
+    throw ApiError.badRequest('Discussion fermee', 'CHAT_CLOSED');
+  }
+}
+
+livreurRouter.get(
+  '/orders/:id/messages',
+  validate({ params: idParam }),
+  asyncHandler(async (req, res) => {
+    const order = await getAssignedOrderOrThrow(req.params.id, req.user!.id);
+    const messages = await prisma.orderMessage.findMany({
+      where: { order_id: order.id },
+      orderBy: { created_at: 'asc' },
+      take: 200,
+    });
+    res.json(messages);
+  }),
+);
+
+livreurRouter.post(
+  '/orders/:id/messages',
+  validate(orderMessageSchema),
+  asyncHandler(async (req, res) => {
+    const order = await getAssignedOrderOrThrow(req.params.id, req.user!.id);
+    assertChatOpen(order.status);
+    const body = req.validated?.body as { kind: 'text' | 'price'; text?: string; price?: number };
+    if (body.kind === 'price' && !order.custom_request_id) {
+      throw ApiError.forbidden('Prix réservé aux demandes personnalisées', 'PRICE_FORBIDDEN');
+    }
+    const message = await prisma.orderMessage.create({
+      data: {
+        order_id: order.id,
+        sender_id: req.user!.id,
+        sender_role: 'admin',
+        kind: body.kind,
+        text: body.kind === 'text' ? body.text! : (body.text ?? null),
+        price: body.kind === 'price' ? body.price! : null,
+      },
+    });
+    if (body.kind === 'price') {
+      await prisma.order.update({
+        where: { id: order.id },
+        data: { proposed_price: body.price!, price_status: 'proposed' },
+      });
+      emitToOrder(order.id, 'order:price_update', {
+        order_id: order.id,
+        price_status: 'proposed',
+        proposed_price: body.price!,
+      });
+    }
+    emitToOrder(order.id, 'order:message:new', { message });
+    const preview =
+      body.kind === 'price' && body.price != null
+        ? `Prix proposé : ${body.price.toFixed(2)} MAD`
+        : (body.text ?? '').slice(0, 80);
+    await notify({
+      user_id: order.user_id,
+      title: 'Nouveau message',
+      body: preview,
+      type: 'order',
+      data: { order_id: order.id },
+    });
+    try {
+      await pushNewMessageToUser(order.user_id, order.id, preview);
+    } catch (err) {
+      void err;
+    }
+    await notifyAdmins('Nouveau message livreur', preview, 'order', { order_id: order.id });
+    void pushAdmins({
+      title: 'Nouveau message livreur',
+      body: preview,
+      data: { type: 'order_message', order_id: order.id, url: `/admin/orders/${order.id}` },
+    });
+    res.status(201).json(message);
   }),
 );

@@ -73,10 +73,7 @@ export function initSocket(httpServer: HttpServer): Server {
 
     socket.on('livreur:location', async (payload: { lat: number; lng: number; order_id?: string }) => {
       try {
-        // --- DÉSACTIVÉ : gestion de plusieurs livreurs (l'admin fait office de livreur unique) ---
-        // if (role !== 'livreur') return;
-        if (role !== 'admin') return;
-        // --- FIN DÉSACTIVÉ ---
+        if (role !== 'admin' && role !== 'livreur') return;
         if (typeof payload?.lat !== 'number' || typeof payload?.lng !== 'number') return;
         // --- DÉSACTIVÉ : gestion de plusieurs livreurs (l'admin fait office de livreur unique) ---
         // const livreur = await prisma.livreur.findUnique({ where: { user_id: userId } });
