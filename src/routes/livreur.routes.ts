@@ -141,16 +141,30 @@ livreurRouter.post(
     ) {
       throw ApiError.forbidden('Appel indisponible', 'NOT_OFFERED');
     }
-    const rejectedBy = Array.from(new Set([...(order.rejected_by ?? []), req.user!.id]));
-    await prisma.order.update({ where: { id: order.id }, data: { rejected_by: rejectedBy } });
+    // Refus atomique (push) : deux refus simultanes ne peuvent pas se perdre
+    // mutuellement, contrairement a lecture-modification-ecriture. Sans ca,
+    // deux livreurs qui refusent en meme temps pouvaient laisser la commande
+    // gele en pending sans aucun destinataire.
+    if (!(order.rejected_by ?? []).includes(req.user!.id)) {
+      await prisma.order.update({
+        where: { id: order.id },
+        data: { rejected_by: { push: req.user!.id } },
+      });
+    }
+    // Annulation quand TOUS les demarches ont refuse, evaluee sur donnees
+    // fraiches (un accept concurrent peut avoir pris la commande entre-temps).
+    const fresh = await prisma.order.findUnique({
+      where: { id: order.id },
+      select: { status: true, livreur_id: true, diffused_to: true, rejected_by: true },
+    });
     const allRejected =
-      (order.diffused_to ?? []).length > 0 &&
-      (order.diffused_to ?? []).every((id) => rejectedBy.includes(id));
+      (fresh?.diffused_to ?? []).length > 0 &&
+      (fresh?.diffused_to ?? []).every((id) => (fresh?.rejected_by ?? []).includes(id));
     if (allRejected) {
       try {
-        const fresh = await prisma.order.findUnique({ where: { id: order.id } });
-        if (fresh && fresh.status === 'pending' && fresh.livreur_id == null) {
-          await changeOrderStatus(fresh, 'cancelled', { actorRole: 'livreur', actorUserId: req.user!.id });
+        const current = await prisma.order.findUnique({ where: { id: order.id } });
+        if (current && current.status === 'pending' && current.livreur_id == null) {
+          await changeOrderStatus(current, 'cancelled', { actorRole: 'livreur', actorUserId: req.user!.id });
         }
       } catch {
         // Course perdue contre une acceptation concurrente : l'annulation est sans objet.

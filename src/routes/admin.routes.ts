@@ -590,10 +590,18 @@ adminRouter.put(
     };
     const order = await prisma.order.findUnique({ where: { id: req.params.id } });
     if (!order) throw ApiError.notFound('Commande introuvable');
-    // Mainmise livreur : des qu'un livreur a pris la commande, l'admin ne la
-    // touche plus (ni avancement, ni annulation) — course admin/livreur impossible.
+    // Mainmise livreur : des qu'un AUTRE livreur a pris la commande, l'admin
+    // ne la touche plus (ni avancement, ni annulation) — course admin/livreur
+    // impossible. Exception : le livreur est l'admin lui-meme (il a accepte
+    // l'appel et la livre) — il avance alors normalement les etapes.
     if (order.livreur_id != null) {
-      throw ApiError.forbidden('Commande prise en charge par un livreur', 'ORDER_OWNED_BY_LIVREUR');
+      const owner = await prisma.livreur.findUnique({
+        where: { id: order.livreur_id },
+        select: { user_id: true },
+      });
+      if (!owner || owner.user_id !== req.user!.id) {
+        throw ApiError.forbidden('Commande prise en charge par un livreur', 'ORDER_OWNED_BY_LIVREUR');
+      }
     }
     const updated = await changeOrderStatus(order, status, { actorRole: 'admin', actorUserId: req.user!.id });
     res.json(updated);
@@ -790,9 +798,10 @@ adminRouter.get(
   asyncHandler(async (_req, res) => {
     // Inclut les livreurs desactives (role client + ligne Livreur conservee) :
     // sans eux, un livreur "eteint" disparait de l'UI sans aucun moyen de
-    // le reactiver.
+    // le reactiver. Les comptes admin sont exclus : un admin qui accepte
+    // une commande possede une ligne Livreur mais n'est pas gerable ici.
     const users = await prisma.user.findMany({
-      where: { OR: [{ role: 'livreur' }, { livreur: { isNot: null } }] },
+      where: { OR: [{ role: 'livreur' }, { role: 'client', livreur: { isNot: null } }] },
       select: { ...livreurUserSelect, livreur: true },
       orderBy: { created_at: 'desc' },
     });
@@ -871,6 +880,13 @@ adminRouter.put(
       include: { livreur: true },
     });
     if (!existing) throw ApiError.notFound('Livreur introuvable');
+    // Compte admin protege : ni changement de role, ni modification, ni
+    // suppression depuis la gestion livreurs. Un admin qui accepte une
+    // commande possede une ligne Livreur et apparaitrait sinon comme un
+    // livreur "desactive" reactivable en un tap (auto-retrogradation).
+    if (existing.role === 'admin') {
+      throw ApiError.forbidden('Compte administrateur protege : operation interdite', 'ADMIN_ACCOUNT_PROTECTED');
+    }
     // Desactivation interdite tant que le livreur possede des courses non
     // terminees : sinon la commande reste gele (ni admin ni livreur ne peut
     // la toucher une fois prise en charge).
@@ -924,6 +940,10 @@ adminRouter.delete(
       include: { livreur: true },
     });
     if (!existing) throw ApiError.notFound('Livreur introuvable');
+    // Compte admin protege : suppression interdite (voir le garde-fou du PUT).
+    if (existing.role === 'admin') {
+      throw ApiError.forbidden('Compte administrateur protege : operation interdite', 'ADMIN_ACCOUNT_PROTECTED');
+    }
     // Suppression interdite avec des courses non terminees (meme motif que
     // la desactivation). Le garde-fou FK ci-dessous reste en dernier ressort.
     if (existing.livreur) {
