@@ -590,6 +590,11 @@ adminRouter.put(
     };
     const order = await prisma.order.findUnique({ where: { id: req.params.id } });
     if (!order) throw ApiError.notFound('Commande introuvable');
+    // Mainmise livreur : des qu'un livreur a pris la commande, l'admin ne la
+    // touche plus (ni avancement, ni annulation) — course admin/livreur impossible.
+    if (order.livreur_id != null) {
+      throw ApiError.forbidden('Commande prise en charge par un livreur', 'ORDER_OWNED_BY_LIVREUR');
+    }
     const updated = await changeOrderStatus(order, status, { actorRole: 'admin', actorUserId: req.user!.id });
     res.json(updated);
   }),
@@ -736,11 +741,58 @@ const livreurUserSelect = {
   created_at: true,
 } as const;
 
+/**
+ * Reprise en main : une commande prise en charge puis abandonnee (livreur
+ * supprime, desactive ou fantome) repasse en attente non attribuee. L'admin
+ * la retravaille ensuite normalement (diffusion / acceptation / annulation).
+ */
+adminRouter.post(
+  '/orders/:id/reclaim',
+  validate({ params: idParam }),
+  asyncHandler(async (req, res) => {
+    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+    if (!order) throw ApiError.notFound('Commande introuvable');
+    if (order.livreur_id == null) {
+      throw ApiError.badRequest('Commande non attribuee', 'NOT_CLAIMED');
+    }
+    if (order.status === 'delivered' || order.status === 'cancelled') {
+      throw ApiError.badRequest('Commande deja cloturee', 'NOT_RECLAIMABLE');
+    }
+    const updated = await prisma.order.update({
+      where: { id: order.id },
+      data: {
+        livreur_id: null,
+        diffused_at: null,
+        diffused_to: [],
+        rejected_by: [],
+        status: 'pending',
+      },
+      include: orderInclude,
+    });
+    emitToOrder(order.id, 'order:status_update', {
+      order_id: order.id,
+      status: 'pending',
+      label: 'En attente de confirmation',
+    });
+    await notify({
+      user_id: updated.user_id,
+      title: 'Commande reattribuee',
+      body: `Commande ${order.id.slice(0, 8)} : un nouveau livreur va la prendre en charge`,
+      type: 'order',
+      data: { order_id: order.id },
+    });
+    res.json(updated);
+  }),
+);
+
 adminRouter.get(
   '/livreurs',
   asyncHandler(async (_req, res) => {
+    // Inclut les livreurs desactives (role client + ligne Livreur conservee) :
+    // sans eux, un livreur "eteint" disparait de l'UI sans aucun moyen de
+    // le reactiver.
     const users = await prisma.user.findMany({
-      where: { role: 'livreur' },
+      where: { OR: [{ role: 'livreur' }, { livreur: { isNot: null } }] },
       select: { ...livreurUserSelect, livreur: true },
       orderBy: { created_at: 'desc' },
     });
@@ -819,6 +871,20 @@ adminRouter.put(
       include: { livreur: true },
     });
     if (!existing) throw ApiError.notFound('Livreur introuvable');
+    // Desactivation interdite tant que le livreur possede des courses non
+    // terminees : sinon la commande reste gele (ni admin ni livreur ne peut
+    // la toucher une fois prise en charge).
+    if (body.role === 'client' && existing.livreur) {
+      const activeCount = await prisma.order.count({
+        where: { livreur_id: existing.livreur.id, status: { notIn: ['delivered', 'cancelled'] } },
+      });
+      if (activeCount > 0) {
+        throw ApiError.conflict(
+          `Ce livreur a ${activeCount} course(s) en cours : terminez-les ou recuperez-les avant de le desactiver`,
+          'LIVREUR_HAS_ACTIVE_ORDERS',
+        );
+      }
+    }
     const updated = await prisma.$transaction(async (tx) => {
       const user = await tx.user.update({
         where: { id: existing.id },
@@ -853,8 +919,24 @@ adminRouter.delete(
   '/livreurs/:id',
   validate({ params: idParam }),
   asyncHandler(async (req, res) => {
-    const existing = await prisma.user.findUnique({ where: { id: req.params.id } });
+    const existing = await prisma.user.findUnique({
+      where: { id: req.params.id },
+      include: { livreur: true },
+    });
     if (!existing) throw ApiError.notFound('Livreur introuvable');
+    // Suppression interdite avec des courses non terminees (meme motif que
+    // la desactivation). Le garde-fou FK ci-dessous reste en dernier ressort.
+    if (existing.livreur) {
+      const activeCount = await prisma.order.count({
+        where: { livreur_id: existing.livreur.id, status: { notIn: ['delivered', 'cancelled'] } },
+      });
+      if (activeCount > 0) {
+        throw ApiError.conflict(
+          `Ce livreur a ${activeCount} course(s) en cours : terminez-les ou recuperez-les avant de le supprimer`,
+          'LIVREUR_HAS_ACTIVE_ORDERS',
+        );
+      }
+    }
     try {
       await prisma.$transaction(async (tx) => {
         await tx.livreur.deleteMany({ where: { user_id: existing.id } });

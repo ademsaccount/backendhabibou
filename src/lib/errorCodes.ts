@@ -76,6 +76,10 @@ export const ERROR_CODES = [
   'NOT_DIFFUSABLE',
   'ORDER_TAKEN',
   'NOT_OFFERED',
+  'ORDER_OWNED_BY_LIVREUR',
+  'LIVREUR_HAS_ACTIVE_ORDERS',
+  'NOT_CLAIMED',
+  'NOT_RECLAIMABLE',
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];
