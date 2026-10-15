@@ -5,10 +5,9 @@ import { requireAuth, requireRole } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { createCustomRequestSchema, customRequestStatusFilterQuery, idParam } from '../schemas';
 import { notifyAdmins } from '../lib/notify';
-import { pushAdmins } from '../lib/push';
-import { emitToAdmins } from '../socket/io';
 import { changeOrderStatus, deliveryFee } from '../services/order.service';
-import { orderInclude } from './order.routes';
+import { routeNewOrder } from '../services/dispatch.service';
+import { orderInclude } from '../lib/orderInclude';
 
 const includeCR = {
   address: true,
@@ -60,29 +59,18 @@ customRequestRouter.post(
       return { cr: created, order: createdOrder };
     });
 
-    await notifyAdmins(
-      'Nouvelle demande personnalisée',
-      `${req.user!.full_name} : ${cr.description_text.slice(0, 80)}`,
-      'custom_request',
-      { custom_request_id: cr.id, order_id: order.id },
-    );
-    // Même appel entrant que les commandes (titre "demande personnalisée" côté admin).
-    emitToAdmins('order:incoming', {
-      order_id: order.id,
-      custom_request_id: cr.id,
-      restaurant: null,
-      total_price: order.total_price,
-      items_count: 0,
-      payment_method: order.payment_method,
-      url: `/admin/incoming?order_id=${order.id}`,
-      created_at: order.created_at.toISOString(),
-    });
-    void pushAdmins({
-      title: 'Nouvelle demande personnalisée',
-      body: `${req.user!.full_name} : ${cr.description_text.slice(0, 80)}`,
-      channelId: 'incoming_order',
-      sound: 'incoming_order.wav',
-      data: { type: 'order_incoming', order_id: order.id, url: `/admin/incoming?order_id=${order.id}` },
+    // Meme routage que les commandes : admin libre -> appel entrant,
+    // admin occupe -> diffusion auto aux livreurs libres, sinon file d'attente.
+    await routeNewOrder({
+      orderId: order.id,
+      restaurantName: null,
+      itemsCount: 0,
+      paymentMethod: order.payment_method,
+      customRequest: {
+        id: cr.id,
+        title: 'Nouvelle demande personnalisée',
+        body: `${req.user!.full_name} : ${cr.description_text.slice(0, 80)}`,
+      },
     });
 
     res.status(201).json({ custom_request: cr, order });

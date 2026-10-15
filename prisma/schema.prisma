@@ -315,6 +315,8 @@ model Order {
   price_status      PriceStatus @default(none)
   /** Diffusion d'appel : snapshot des livreurs démarchés + refus (tous refusent = annulation). */
   diffused_at       DateTime?
+  /** File d'attente : posée quand l'admin est occupé et aucun livreur libre ; vide après diffusion. */
+  queued_at         DateTime?
   diffused_to       String[]  @default([])
   rejected_by       String[]  @default([])
   address_id        String

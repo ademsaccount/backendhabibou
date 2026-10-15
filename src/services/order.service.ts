@@ -7,6 +7,8 @@ import { ApiError } from '../lib/errors';
 // --- FIN DÉSACTIVÉ ---
 import { notify, notifyAdmins } from '../lib/notify';
 import { pushOrderStatusToUser } from '../lib/push';
+import { logger } from '../lib/logger';
+import { processQueueAfterFreeUp } from './dispatch.service';
 import { emitToOrder } from '../socket/io';
 import { stripeEnabled } from '../lib/stripe';
 
@@ -84,6 +86,8 @@ export async function changeOrderStatus(
     data: {
       status: to,
       ...(adminLivreurId ? { livreur_id: adminLivreurId } : {}),
+      // Sortie de "pending" ou de file : l'indicateur d'attente ne sert plus.
+      ...(to !== 'pending' ? { queued_at: null } : {}),
       ...(to === 'delivered'
         ? {
             delivered_at: new Date(),
@@ -142,6 +146,15 @@ export async function changeOrderStatus(
   } catch (err) {
     // pushToUser n leve pas — garde-fou par principe.
     void err;
+  }
+
+  // Course terminee par son livreur : il se libere -> on purge la file d'attente.
+  if ((to === 'delivered' || to === 'cancelled') && updated.livreur_id && updated.livreur) {
+    try {
+      await processQueueAfterFreeUp(updated.livreur.user_id);
+    } catch (err) {
+      logger.error('dispatch', 'purge file impossible', err instanceof Error ? err : String(err));
+    }
   }
 
   return updated;

@@ -33,14 +33,15 @@ import {
 // --- DÉSACTIVÉ : gestion de plusieurs livreurs (l'admin fait office de livreur unique) ---
 // import { assignLivreur, changeOrderStatus } from '../services/order.service';
 import { changeOrderStatus } from '../services/order.service';
+import { diffuseOrderToLivreurs, getFreeLivreurUserIds } from '../services/dispatch.service';
 // --- FIN DÉSACTIVÉ ---
 // --- DÉSACTIVÉ : gestion de plusieurs livreurs (l'admin fait office de livreur unique) ---
 // import { haversineKm, roundKm } from '../lib/geo';
 // --- FIN DÉSACTIVÉ ---
-import { orderInclude } from './order.routes';
-import { broadcast, emitToOrder, emitToUser } from '../socket/io';
+import { orderInclude } from '../lib/orderInclude';
+import { broadcast, emitToOrder } from '../socket/io';
 import { notify, notifyAssignedLivreur } from '../lib/notify';
-import { pushNewMessageToUser, pushToUser } from '../lib/push';
+import { pushNewMessageToUser } from '../lib/push';
 import type { Prisma } from '@prisma/client';
 
 type ProductBody = {
@@ -622,34 +623,8 @@ adminRouter.post(
     if (order.status !== 'pending') {
       throw ApiError.badRequest('Diffusion impossible a ce stade', 'NOT_DIFFUSABLE');
     }
-    const online = await prisma.livreur.findMany({
-      where: { is_online: true, user_id: { not: req.user!.id }, user: { role: 'livreur' } },
-      select: { user_id: true },
-    });
-    if (online.length === 0) {
-      throw ApiError.badRequest('Aucun livreur en ligne', 'DIFFUSE_EMPTY');
-    }
-    const ids = online.map((l) => l.user_id);
-    const updated = await prisma.order.update({
-      where: { id: order.id },
-      data: { diffused_at: new Date(), diffused_to: ids, rejected_by: [] },
-      include: orderInclude,
-    });
-    for (const userId of ids) {
-      emitToUser(userId, 'order:diffuse', { order_id: order.id });
-    }
-    for (const userId of ids) {
-      void pushToUser(userId, {
-        templates: {
-          fr: { title: 'Nouvel appel', body: `Commande ${order.id.slice(0, 8)} à prendre` },
-          en: { title: 'New call', body: `Order ${order.id.slice(0, 8)} to take` },
-          ar: { title: 'نداء جديد', body: `طلب ${order.id.slice(0, 8)} للاستلام` },
-        },
-        channelId: 'incoming_order',
-        sound: 'incoming_order.wav',
-        data: { type: 'order_incoming', order_id: order.id, url: `/livreur/incoming?order_id=${order.id}` },
-      });
-    }
+    const free = await getFreeLivreurUserIds(req.user!.id);
+    const updated = await diffuseOrderToLivreurs(order.id, free);
     res.json(updated);
   }),
 );

@@ -5,10 +5,11 @@ import { requireAuth, requireRole } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { idParam, locationSchema, orderMessageSchema, orderStatusSchema } from '../schemas';
 import { changeOrderStatus } from '../services/order.service';
+import { countActiveOrdersForUser, processQueueAfterFreeUp } from '../services/dispatch.service';
 import { emitToAdmins, emitToOrder } from '../socket/io';
 import { notify, notifyAdmins } from '../lib/notify';
 import { pushAdmins, pushNewMessageToUser } from '../lib/push';
-import { orderInclude } from './order.routes';
+import { orderInclude } from '../lib/orderInclude';
 
 const ACTIVE = ['confirmed', 'preparing', 'picked_up', 'on_the_way'] as const;
 const DONE = ['delivered', 'cancelled'] as const;
@@ -39,6 +40,10 @@ livreurRouter.put(
     const is_online = typeof req.body?.is_online === 'boolean' ? req.body.is_online : !livreur.is_online;
     const updated = await prisma.livreur.update({ where: { id: livreur.id }, data: { is_online } });
     emitToAdmins('livreur:location_update', { livreur_id: updated.id, user_id: updated.user_id, is_online });
+    // (Re)connexion d'un livreur : une course en file peut lui etre proposee.
+    if (is_online) {
+      void processQueueAfterFreeUp(req.user!.id);
+    }
     res.json(updated);
   }),
 );
@@ -101,6 +106,11 @@ livreurRouter.post(
     const livreur = await getLivreur(req.user!.id);
     const order = await prisma.order.findUnique({ where: { id: req.params.id } });
     if (!order) throw ApiError.notFound('Commande introuvable');
+    // Un livreur ne porte qu'une course a la fois (la multi-course est
+    // reservee a l'admin, via ses propres routes).
+    if ((await countActiveOrdersForUser(req.user!.id)) > 0) {
+      throw ApiError.conflict('Vous avez déjà une course en cours', 'LIVREUR_HAS_ACTIVE_ORDERS');
+    }
     if (
       order.status !== 'pending' ||
       !(order.diffused_to ?? []).includes(req.user!.id) ||

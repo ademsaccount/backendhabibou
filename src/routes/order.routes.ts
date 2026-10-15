@@ -5,24 +5,14 @@ import { requireAuth, requireRole } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { createOrderSchema, idParam, orderMessageSchema, approvePriceSchema, orderStatusFilterQuery, rateOrderSchema } from '../schemas';
 import { deliveryFee } from '../services/order.service';
+import { routeNewOrder } from '../services/dispatch.service';
 import { isOpenNow } from '../lib/open';
 import { notify, notifyAdmins, notifyAssignedLivreur } from '../lib/notify';
 import { pushAdmins, pushNewMessageToUser, pushOrderStatusToUser } from '../lib/push';
-import { emitToAdmins, emitToOrder } from '../socket/io';
+import { emitToOrder } from '../socket/io';
 import { createPaymentIntent, stripeEnabled } from '../lib/stripe';
+import { orderInclude } from '../lib/orderInclude';
 import type { Prisma } from '@prisma/client';
-
-export const orderInclude = {
-  items: { include: { product: { select: { id: true, name: true, image_url: true, restaurant_id: true } } } },
-  restaurant: true,
-  address: true,
-  livreur: {
-    include: { user: { select: { id: true, full_name: true, phone: true, avatar_url: true } } },
-  },
-  user: { select: { id: true, full_name: true, phone: true, avatar_url: true } },
-  custom_request: true,
-  review: true,
-} satisfies Prisma.OrderInclude;
 
 /** Recolte {name, price} dans le JSON de catalog d'options d'un produit. */
 function collectCatalogEntries(node: unknown, out: { name: string; price: number }[]): void {
@@ -194,33 +184,15 @@ orderRouter.post(
       });
     });
 
-    const orderRef = order.id.slice(0, 8);
     const restaurantName = order.restaurant?.name ?? 'Commerce';
 
-    // Alerte "appel entrant" cote admin (sudo_habichou) : event socket + push.
-    emitToAdmins('order:incoming', {
-      order_id: order.id,
-      restaurant: restaurantName,
-      total_price: order.total_price,
-      items_count: order.items.length,
-      payment_method: order.payment_method,
-      url: `/admin/incoming?order_id=${order.id}`,
-      created_at: order.created_at.toISOString(),
-    });
-
-    await notifyAdmins(
-      'Nouvelle commande',
-      `Commande ${orderRef} — ${order.total_price.toFixed(2)} MAD`,
-      'order',
-      { order_id: order.id },
-    );
-
-    void pushAdmins({
-      title: 'Nouvelle commande',
-      body: `${restaurantName} — ${order.total_price.toFixed(2)} MAD · ${order.items.length} article(s)`,
-      channelId: 'incoming_order',
-      sound: 'incoming_order.wav',
-      data: { type: 'order_incoming', order_id: order.id, url: `/admin/incoming?order_id=${order.id}` },
+    // Routage intelligent de l'appel : admin libre -> appel entrant admin ;
+    // admin occupe -> diffusion auto aux livreurs libres ; sinon file d'attente.
+    await routeNewOrder({
+      orderId: order.id,
+      restaurantName,
+      itemsCount: order.items.length,
+      paymentMethod: order.payment_method,
     });
 
     res.status(201).json(order);
