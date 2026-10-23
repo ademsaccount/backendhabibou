@@ -23,7 +23,7 @@ export const ORDERS_CHANNEL_ID = 'orders';
 export interface PushPayload {
   title: string;
   body: string;
-  /** Canal Android (doit correspondre a un setNotificationChannelAsync cote app). */
+  /** Canal Android (doit corspondre a un setNotificationChannelAsync cote app). */
   channelId?: string;
   /** Son : 'default' ou nom de fichier bundle (ex: incoming_order.wav). */
   sound?: string;
