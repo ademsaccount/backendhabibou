@@ -99,8 +99,6 @@ orderRouter.post(
     const address = await prisma.address.findUnique({ where: { id: body.address_id } });
     if (!address || address.user_id !== userId) throw ApiError.notFound('Adresse introuvable');
 
-    const fee = deliveryFee();
-
     const order = await prisma.$transaction(async (tx) => {
       const items = body.items ?? [];
       if (items.length === 0) throw ApiError.badRequest('Panier vide', 'EMPTY_CART');
@@ -125,6 +123,7 @@ orderRouter.post(
       }
 
       let restaurantId: string | null = null;
+      const shopIds = new Set<string>();
       let subtotal = 0;
       const orderItems: Prisma.OrderItemUncheckedCreateWithoutOrderInput[] = [];
 
@@ -132,10 +131,10 @@ orderRouter.post(
         const product = byId.get(item.product_id);
         if (!product) throw ApiError.badRequest(`Produit introuvable : ${item.product_id}`, 'PRODUCT_NOT_FOUND');
         if (!product.is_available) throw ApiError.badRequest(`${product.name} n'est plus disponible`, 'PRODUCT_UNAVAILABLE');
-        if (restaurantId && product.restaurant_id !== restaurantId) {
-          throw ApiError.badRequest('Tous les articles doivent venir du meme commerce', 'MULTI_RESTAURANT');
-        }
-        restaurantId = product.restaurant_id;
+        // Panier multi-commerces accepte dans UNE commande : le premier commerce
+        // du panier est le pickup principal, le livreur enchaine les autres.
+        if (!restaurantId) restaurantId = product.restaurant_id;
+        shopIds.add(product.restaurant_id);
 
         const catalog: { name: string; price: number }[] = [];
         collectCatalogEntries(product.options, catalog);
@@ -166,9 +165,14 @@ orderRouter.post(
       }
 
       if (!restaurantId) throw ApiError.badRequest('Aucun produit valide', 'INVALID_ITEMS');
-      const restaurant = await tx.restaurant.findUnique({ where: { id: restaurantId } });
-      if (!restaurant) throw ApiError.notFound('Commerce introuvable');
-      if (!isOpenNow(restaurant)) throw ApiError.badRequest('Commerce ferme actuellement', 'RESTAURANT_CLOSED');
+      // Tous les commerces de la commande doivent etre ouverts au moment de commander.
+      const shops = await tx.restaurant.findMany({ where: { id: { in: [...shopIds] } } });
+      const closedShop = shops.find((shop) => !isOpenNow(shop));
+      if (closedShop) {
+        throw ApiError.badRequest(`Commerce ferme actuellement : ${closedShop.name}`, 'RESTAURANT_CLOSED');
+      }
+      // Frais : base au premier commerce + supplement par commerce supplementaire.
+      const fee = deliveryFee(shopIds.size);
 
       return tx.order.create({
         data: {

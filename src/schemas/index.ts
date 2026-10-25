@@ -47,12 +47,20 @@ export const productsQuery = z.object({
   q: z.string().trim().min(1).optional(),
 });
 
+/** Types d'adresse sélectionnables (chips icon dans l'app ; label libre à part). */
+export const ADDRESS_TYPES = ['home', 'work', 'caffe', 'other'] as const;
+
 export const createAddressSchema = z.object({
   body: z.object({
     label: z.string().trim().min(1, 'Label requis'),
+    type: z.enum(ADDRESS_TYPES).optional(),
     latitude: z.coerce.number().min(-90).max(90),
     longitude: z.coerce.number().min(-180).max(180),
     address_text: z.string().trim().min(3, 'Adresse requise'),
+    /** Rue auto-resolue (la plus proche du point) — envoyée par l'app, jamais saisie. */
+    street_name: z.string().trim().optional(),
+    /** Bloc geocodage inverse brut (cles Nominatim conservees). */
+    geocode: z.record(z.string(), z.string()).optional(),
     is_default: z.boolean().optional(),
   }),
 });
@@ -61,9 +69,12 @@ export const updateAddressSchema = z.object({
   params: idParam,
   body: z.object({
     label: z.string().trim().min(1).optional(),
+    type: z.enum(ADDRESS_TYPES).optional(),
     latitude: z.coerce.number().min(-90).max(90).optional(),
     longitude: z.coerce.number().min(-180).max(180).optional(),
     address_text: z.string().trim().min(3).optional(),
+    street_name: z.string().trim().optional(),
+    geocode: z.record(z.string(), z.string()).optional(),
     is_default: z.boolean().optional(),
   }),
 });

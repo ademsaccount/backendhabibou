@@ -213,6 +213,13 @@ publicRouter.get(
 export const addressRouter = Router();
 addressRouter.use(requireAuth);
 
+// REST JSON = "type", colonne Prisma = address_type.
+type AddressRow = { address_type: string; street_name: string | null } & Record<string, unknown>;
+const addressJson = (row: AddressRow) => {
+  const { address_type, ...rest } = row;
+  return { ...rest, type: address_type ?? 'other' };
+};
+
 addressRouter.get(
   '/',
   asyncHandler(async (req, res) => {
@@ -220,7 +227,7 @@ addressRouter.get(
       where: { user_id: req.user!.id },
       orderBy: [{ is_default: 'desc' }, { created_at: 'desc' }],
     });
-    res.json(addresses);
+    res.json((addresses as unknown as AddressRow[]).map(addressJson));
   }),
 );
 
@@ -231,23 +238,38 @@ addressRouter.post(
     const userId = req.user!.id;
     const body = req.validated?.body as {
       label: string;
+      type?: string;
       latitude: number;
       longitude: number;
       address_text: string;
+      street_name?: string;
+      geocode?: Record<string, string>;
       is_default?: boolean;
     };
+    // REST JSON = "type", colonne Prisma = address_type.
+    const { label, type, latitude, longitude, address_text, street_name, geocode, is_default } = body;
     const count = await prisma.address.count({ where: { user_id: userId } });
-    const makeDefault = body.is_default || count === 0;
+    const makeDefault = is_default || count === 0;
 
     const address = await prisma.$transaction(async (tx) => {
       if (makeDefault) {
         await tx.address.updateMany({ where: { user_id: userId }, data: { is_default: false } });
       }
       return tx.address.create({
-        data: { ...body, is_default: makeDefault, user_id: userId },
+        data: {
+          label,
+          address_type: type ?? 'other',
+          latitude,
+          longitude,
+          address_text,
+          street_name,
+          geocode,
+          is_default: makeDefault,
+          user_id: userId,
+        },
       });
     });
-    res.status(201).json(address);
+    res.status(201).json(addressJson(address as unknown as AddressRow));
   }),
 );
 
@@ -260,13 +282,17 @@ addressRouter.put(
     if (!existing || existing.user_id !== userId) throw ApiError.notFound('Adresse introuvable');
 
     const body = req.validated?.body as Record<string, unknown> | undefined;
+    // REST JSON = "type", colonne Prisma = address_type.
+    const { type, ...bodyRest } = body ?? {};
+    const data: Record<string, unknown> = { ...bodyRest };
+    if (typeof type === 'string') data.address_type = type;
     const address = await prisma.$transaction(async (tx) => {
-      if (body?.is_default) {
+      if (data.is_default) {
         await tx.address.updateMany({ where: { user_id: userId }, data: { is_default: false } });
       }
-      return tx.address.update({ where: { id: existing.id }, data: body ?? {} });
+      return tx.address.update({ where: { id: existing.id }, data });
     });
-    res.json(address);
+    res.json(addressJson(address as unknown as AddressRow));
   }),
 );
 

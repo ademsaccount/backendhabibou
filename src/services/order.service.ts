@@ -252,6 +252,11 @@ export async function changeOrderStatus(
 // }
 // --- FIN DÉSACTIVÉ ---
 
-export function deliveryFee(): number {
-  return env.DELIVERY_FEE;
+/**
+ * Frais de livraison d'une commande : base au premier commerce, supplement
+ * par commerce supplementaire (le livreur enchaine les pickups dans une
+ * SEULE commande). Meme formule cote app : DELIVERY_FEE + HOP × (shops−1).
+ */
+export function deliveryFee(shopsCount = 1): number {
+  return env.DELIVERY_FEE + Math.max(0, shopsCount - 1) * env.DELIVERY_HOP_FEE;
 }

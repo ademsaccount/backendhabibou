@@ -1,5 +1,5 @@
-// Prisma schema — Habichou
-// Toutes les colonnes en snake_case (contrat JSON = snake_case côté REST).
+// Prisma schema â€” Habichou
+// Toutes les colonnes en snake_case (contrat JSON = snake_case cÃ´tÃ© REST).
 
 generator client {
   provider = "prisma-client-js"
@@ -73,7 +73,7 @@ model User {
   full_name     String
   role          Role     @default(client)
   avatar_url    String?
-  // Jeton Expo Push (app sudo_habichou) — null = notifications push non enregistrees.
+  // Jeton Expo Push (app sudo_habichou) â€” null = notifications push non enregistrees.
   expo_push_token String?
   // Locale du client pour localiser les pushes (fr | en | aeb).
   locale          String?
@@ -108,9 +108,16 @@ model Address {
   id           String   @id @default(uuid())
   user_id      String
   label        String
+  address_type String   @default("other")
   latitude     Float
   longitude    Float
   address_text String
+  /** Rue la plus proche, resolue automatiquement depuis la carte (jamais saisie par l'utilisateur). */
+  street_name  String?
+  /** Bloc complet du geocodage inverse (Nominatim) : display_name + objet
+   *  address brut, cles conservees telles quelles (country, county, postcode,
+   *  state, state_district, road, house_number… quand presentes). */
+  geocode      Json?
   is_default   Boolean  @default(false)
   created_at   DateTime @default(now())
 
@@ -165,7 +172,7 @@ model Product {
   // Tailles multiples (2+ : Medium/Large/...) : [{ label, price }].
   // Des que 2 tailles ou plus, price = min des tailles ("a partir de X").
   sizes                 Json?
-  // Lien vers la categorie de medicament (flux Pharmacie) — null hors pharmacie.
+  // Lien vers la categorie de medicament (flux Pharmacie) â€” null hors pharmacie.
   medication_category_id String?
   is_available          Boolean  @default(true)
   options               Json?
@@ -237,7 +244,7 @@ model ProductSupplement {
   @@index([supplement_id])
 }
 
-// Categories de medicaments du flux Pharmacie — table configurable cote admin (pas en dur).
+// Categories de medicaments du flux Pharmacie â€” table configurable cote admin (pas en dur).
 model MedicationCategory {
   id          String   @id @default(uuid())
   name        String
@@ -288,7 +295,7 @@ model CartItem {
   quantity   Int     @default(1)
   notes      String?
   options    Json?
-  // Taille choisie (remplace le prix de base, distinct des suppléments).
+  // Taille choisie (remplace le prix de base, distinct des supplÃ©ments).
   size_label String?
 
   cart    Cart    @relation(fields: [cart_id], references: [id], onDelete: Cascade)
@@ -310,12 +317,12 @@ model Order {
   payment_method    PaymentMethod @default(cash)
   payment_status    PaymentStatus @default(pending)
   payment_intent_id String?
-  /** Prix proposé par le livreur (négo demande spécifique) ; total = prix + livraison à l'approbation. */
+  /** Prix proposÃ© par le livreur (nÃ©go demande spÃ©cifique) ; total = prix + livraison Ã  l'approbation. */
   proposed_price    Float?
   price_status      PriceStatus @default(none)
-  /** Diffusion d'appel : snapshot des livreurs démarchés + refus (tous refusent = annulation). */
+  /** Diffusion d'appel : snapshot des livreurs dÃ©marchÃ©s + refus (tous refusent = annulation). */
   diffused_at       DateTime?
-  /** File d'attente : posée quand l'admin est occupé et aucun livreur libre ; vide après diffusion. */
+  /** File d'attente : posÃ©e quand l'admin est occupÃ© et aucun livreur libre ; vide aprÃ¨s diffusion. */
   queued_at         DateTime?
   diffused_to       String[]  @default([])
   rejected_by       String[]  @default([])
@@ -347,7 +354,7 @@ model OrderItem {
   unit_price Float
   notes      String?
   options    Json?
-  // Taille choisie (remplace le prix de base, distinct des suppléments).
+  // Taille choisie (remplace le prix de base, distinct des supplÃ©ments).
   size_label String?
 
   order   Order   @relation(fields: [order_id], references: [id], onDelete: Cascade)
@@ -356,7 +363,7 @@ model OrderItem {
   @@index([order_id])
 }
 
-/** Message de négociation d'une commande (texte libre ou proposition de prix). */
+/** Message de nÃ©gociation d'une commande (texte libre ou proposition de prix). */
 model OrderMessage {
   id          String   @id @default(uuid())
   order_id    String
@@ -423,20 +430,20 @@ model Review {
   @@index([user_id])
 }
 
-/** Story d'offre d'un commerce (style Instagram) : image ou vidéo + texte optionnel. */
+/** Story d'offre d'un commerce (style Instagram) : image ou vidÃ©o + texte optionnel. */
 model Story {
   id                  String     @id @default(uuid())
   restaurant_id       String
   media_url           String
   media_type          StoryMedia
-  /** Légende affichée sur le média (emojis inclus). */
+  /** LÃ©gende affichÃ©e sur le mÃ©dia (emojis inclus). */
   text                String?
   /** Couleur du texte (hex #RRGGBB), null = blanc. */
   text_color          String?
-  /** Position du texte en fractions d'écran centrées (-0.5..0.5), null = bas centré. */
+  /** Position du texte en fractions d'Ã©cran centrÃ©es (-0.5..0.5), null = bas centrÃ©. */
   text_x              Float?
   text_y              Float?
-  /** Échelle du texte (0.5..3), null = 1. */
+  /** Ã‰chelle du texte (0.5..3), null = 1. */
   text_scale          Float?
   /** Fin de diffusion (null = sans limite). */
   expires_at          DateTime?
