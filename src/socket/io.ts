@@ -59,7 +59,14 @@ export function initSocket(httpServer: HttpServer): Server {
         //   allowed = Boolean(livreur && order.livreur_id === livreur.id);
         // }
         // --- FIN DÉSACTIVÉ ---
-        if (!allowed) return ack?.({ error: { code: 'FORBIDDEN', message: 'Acces refuse' } });
+        // Le livreur assigné doit pouvoir suivre SA course en temps réel
+        // (messages + changements d'état) : sans ça, il ne reçoit que les pushes.
+        let livreurAllowed = false;
+        if (!allowed && role === 'livreur') {
+          const livreur = await prisma.livreur.findUnique({ where: { user_id: userId } });
+          livreurAllowed = Boolean(livreur && order.livreur_id === livreur.id);
+        }
+        if (!allowed && !livreurAllowed) return ack?.({ error: { code: 'FORBIDDEN', message: 'Acces refuse' } });
         socket.join(`order:${orderId}`);
         ack?.({ ok: true });
       } catch {

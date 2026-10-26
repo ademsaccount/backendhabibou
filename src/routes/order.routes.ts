@@ -9,7 +9,7 @@ import { routeNewOrder } from '../services/dispatch.service';
 import { isOpenNow } from '../lib/open';
 import { notify, notifyAdmins, notifyAssignedLivreur } from '../lib/notify';
 import { pushAdmins, pushNewMessageToUser, pushOrderStatusToUser } from '../lib/push';
-import { emitToOrder } from '../socket/io';
+import { emitToAdmins, emitToOrder } from '../socket/io';
 import { createPaymentIntent, stripeEnabled } from '../lib/stripe';
 import { orderInclude } from '../lib/orderInclude';
 import type { Prisma } from '@prisma/client';
@@ -317,6 +317,9 @@ orderRouter.post(
       },
     });
     emitToOrder(order.id, 'order:message:new', { message });
+    // Salle « admins » : l'interface admin suit ses messages non lus (badge)
+    // même quand aucun écran n'est abonné à cette commande précise.
+    emitToAdmins('order:message:new', { message });
     await notifyAdmins(
       'Nouveau message client',
       (body.text ?? '').slice(0, 80),
