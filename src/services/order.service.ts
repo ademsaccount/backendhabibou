@@ -102,6 +102,7 @@ export async function changeOrderStatus(
       livreur: { include: { user: { select: { id: true, full_name: true, phone: true, avatar_url: true } } } },
       user: { select: { id: true, full_name: true, phone: true } },
       custom_request: true,
+      shop_statuses: { select: { restaurant_id: true, status: true } },
     },
   });
 
@@ -158,6 +159,82 @@ export async function changeOrderStatus(
   }
 
   return updated;
+}
+
+/**
+ * Tap du livreur/admin sur la carte d'UN commerce du pipeline branche :
+ * SEUL ce commerce passe a picked_up, les autres restent en preparation.
+ * Quand TOUS les commerces de la commande sont retires, la commande passe
+ * globalement a picked_up (suite du tronc on_the_way -> delivered inchangee).
+ *
+ * Premier tap depuis « confirmée » : la tournée démarre — la commande passe
+ * globalement a preparing (notification client comprise).
+ * Ce n'est actif qu'aux etapes « branches » (confirmed / preparing). Les
+ * commerces sans ligne OrderShopStatus sont derives a `preparing` cote client.
+ */
+export async function pickUpOrderShop(
+  order: Order,
+  restaurantId: string,
+  opts: { actorRole?: string; actorUserId?: string } = {},
+): Promise<Order> {
+  if (order.status !== 'confirmed' && order.status !== 'preparing') {
+    throw ApiError.badRequest(`Etape par commerce indisponible : ${order.status}`, 'INVALID_TRANSITION');
+  }
+
+  // Le commerce doit appartenir a la commande (articles qu'il a produit).
+  const items = await prisma.orderItem.findMany({
+    where: { order_id: order.id },
+    select: { product: { select: { restaurant_id: true } } },
+  });
+  const shops = [...new Set(items.map((item) => item.product.restaurant_id).filter((id): id is string => !!id))];
+  if (!shops.includes(restaurantId)) {
+    throw ApiError.notFound('Commerce introuvable dans cette commande');
+  }
+
+  // Premier tap de branche depuis « confirmée » → la tournée démarre.
+  let stage = order;
+  if (order.status === 'confirmed') {
+    stage = await changeOrderStatus(order, 'preparing', opts);
+  }
+
+  await prisma.orderShopStatus.upsert({
+    where: { order_id_restaurant_id: { order_id: order.id, restaurant_id: restaurantId } },
+    update: { status: 'picked_up' },
+    create: { order_id: order.id, restaurant_id: restaurantId, status: 'picked_up' },
+  });
+
+  emitToOrder(order.id, 'order:shop_status_update', {
+    order_id: order.id,
+    restaurant_id: restaurantId,
+    status: 'picked_up',
+  });
+
+  // Tous les commerces retires -> bascule du tronc vers picked_up.
+  const picked = await prisma.orderShopStatus.count({
+    where: { order_id: order.id, status: 'picked_up' },
+  });
+  if (picked >= shops.length) {
+    return changeOrderStatus(stage, 'picked_up', opts);
+  }
+  return resolveOrder(stage.id);
+}
+
+/** Variant economique : la commande rattachee a `id` avec l'include complet. */
+async function resolveOrder(id: string): Promise<Order> {
+  const fresh = await prisma.order.findUnique({
+    where: { id },
+    include: {
+      items: { include: { product: true } },
+      restaurant: true,
+      address: true,
+      livreur: { include: { user: { select: { id: true, full_name: true, phone: true, avatar_url: true } } } },
+      user: { select: { id: true, full_name: true, phone: true } },
+      custom_request: true,
+      shop_statuses: { select: { restaurant_id: true, status: true } },
+    },
+  });
+  if (!fresh) throw ApiError.notFound('Commande introuvable');
+  return fresh;
 }
 
 // --- DÉSACTIVÉ : gestion de plusieurs livreurs (l'admin fait office de livreur unique) ---

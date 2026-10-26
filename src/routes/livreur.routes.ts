@@ -3,8 +3,8 @@ import { prisma } from '../lib/prisma';
 import { ApiError, asyncHandler } from '../lib/errors';
 import { requireAuth, requireRole } from '../middleware/auth';
 import { validate } from '../middleware/validate';
-import { idParam, locationSchema, orderMessageSchema, orderStatusSchema } from '../schemas';
-import { changeOrderStatus } from '../services/order.service';
+import { idParam, locationSchema, orderMessageSchema, orderShopStatusSchema, orderStatusSchema } from '../schemas';
+import { changeOrderStatus, pickUpOrderShop } from '../services/order.service';
 import { countActiveOrdersForUser, processQueueAfterFreeUp } from '../services/dispatch.service';
 import { emitToAdmins, emitToOrder } from '../socket/io';
 import { notify, notifyAdmins } from '../lib/notify';
@@ -91,6 +91,25 @@ livreurRouter.put(
     if (!order) throw ApiError.notFound('Commande introuvable');
     if (order.livreur_id !== livreur.id) throw ApiError.forbidden();
     const updated = await changeOrderStatus(order, status, { actorRole: 'livreur' });
+    res.json(updated);
+  }),
+);
+
+/**
+ * Tap livreur sur la carte d'UN commerce du pipeline multi-commerces :
+ * seul ce commerce passe a picked_up ; la commande bascule globalement
+ * a picked_up quand tous les commerces sont retires.
+ */
+livreurRouter.put(
+  '/orders/:id/shops/:restaurant_id/status',
+  validate(orderShopStatusSchema),
+  asyncHandler(async (req, res) => {
+    const livreur = await getLivreur(req.user!.id);
+    const { restaurant_id } = req.validated?.params as { id: string; restaurant_id: string };
+    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+    if (!order) throw ApiError.notFound('Commande introuvable');
+    if (order.livreur_id !== livreur.id) throw ApiError.forbidden();
+    const updated = await pickUpOrderShop(order, restaurant_id, { actorRole: 'livreur' });
     res.json(updated);
   }),
 );

@@ -173,6 +173,15 @@ export const adminOrderStatusSchema = z.object({
   }),
 });
 
+/** Tap livreur sur la carte d'un commerce du pipeline branche (retirer la commande). */
+export const orderShopStatusSchema = z.object({
+  params: z.object({
+    id: z.string().min(1),
+    restaurant_id: z.string().min(1),
+  }),
+  body: z.object({ status: z.enum(['picked_up']) }),
+});
+
 // --- DÉSACTIVÉ : gestion de plusieurs livreurs (l'admin fait office de livreur unique) ---
 export const assignSchema = z.object({
   params: idParam,

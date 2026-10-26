@@ -15,6 +15,7 @@ import {
   idParam,
   orderMessageSchema,
   adminOrderStatusSchema,
+  orderShopStatusSchema,
   orderStatusFilterQuery,
   updateLivreurSchema,
   updateMedicationCategorySchema,
@@ -32,7 +33,7 @@ import {
 } from '../lib/catalog';
 // --- DÉSACTIVÉ : gestion de plusieurs livreurs (l'admin fait office de livreur unique) ---
 // import { assignLivreur, changeOrderStatus } from '../services/order.service';
-import { changeOrderStatus } from '../services/order.service';
+import { changeOrderStatus, pickUpOrderShop } from '../services/order.service';
 import { diffuseOrderToLivreurs, getFreeLivreurUserIds } from '../services/dispatch.service';
 // --- FIN DÉSACTIVÉ ---
 // --- DÉSACTIVÉ : gestion de plusieurs livreurs (l'admin fait office de livreur unique) ---
@@ -605,6 +606,37 @@ adminRouter.put(
       }
     }
     const updated = await changeOrderStatus(order, status, { actorRole: 'admin', actorUserId: req.user!.id });
+    res.json(updated);
+  }),
+);
+
+/**
+ * Tap livreur/admin sur la carte d'UN commerce du pipeline multi-commerces :
+ * seul ce commerce passe a picked_up ; la commande bascule globalement
+ * a picked_up quand tous les commerces sont retires.
+ */
+adminRouter.put(
+  '/orders/:id/shops/:restaurant_id/status',
+  validate(orderShopStatusSchema),
+  asyncHandler(async (req, res) => {
+    const { restaurant_id } = req.validated?.params as { id: string; restaurant_id: string };
+    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+    if (!order) throw ApiError.notFound('Commande introuvable');
+    // Meme mainmise que le statut global : si un AUTRE livreur a la commande,
+    // l'admin ne la touche plus (sauf si le livreur est l'admin lui-meme).
+    if (order.livreur_id != null) {
+      const owner = await prisma.livreur.findUnique({
+        where: { id: order.livreur_id },
+        select: { user_id: true },
+      });
+      if (!owner || owner.user_id !== req.user!.id) {
+        throw ApiError.forbidden('Commande prise en charge par un livreur', 'ORDER_OWNED_BY_LIVREUR');
+      }
+    }
+    const updated = await pickUpOrderShop(order, restaurant_id, {
+      actorRole: 'admin',
+      actorUserId: req.user!.id,
+    });
     res.json(updated);
   }),
 );

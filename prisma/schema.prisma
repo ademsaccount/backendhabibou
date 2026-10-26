@@ -41,6 +41,12 @@ enum OrderStatus {
   cancelled
 }
 
+/** Etat temps reel d'UN commerce dans le pipeline branché d'une commande multi-commerces. */
+enum OrderShopStatusValue {
+  preparing
+  picked_up
+}
+
 enum PaymentMethod {
   card
   cash
@@ -338,6 +344,8 @@ model Order {
   items          OrderItem[]
   messages       OrderMessage[]
   review         Review?
+  /** Etat de chaque branche (commerce) dans le pipeline : tap du livreur par commerce. */
+  shop_statuses  OrderShopStatus[]
 
   @@index([status])
   @@index([user_id])
@@ -360,6 +368,21 @@ model OrderItem {
   order   Order   @relation(fields: [order_id], references: [id], onDelete: Cascade)
   product Product @relation(fields: [product_id], references: [id])
 
+  @@index([order_id])
+}
+
+/** Branche du pipeline : etat d'UN commerce d'une commande (tap livreur avisé). */
+model OrderShopStatus {
+  id            String             @id @default(uuid())
+  order_id      String
+  restaurant_id String
+  status        OrderShopStatusValue @default(preparing)
+  created_at    DateTime           @default(now())
+  updated_at    DateTime           @updatedAt
+
+  order Order @relation(fields: [order_id], references: [id], onDelete: Cascade)
+
+  @@unique([order_id, restaurant_id])
   @@index([order_id])
 }
 
