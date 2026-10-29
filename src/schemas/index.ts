@@ -323,6 +323,7 @@ export const createProductSchema = z.object({
     image_url: z.string().min(1).optional(),
     category: z.string().trim().min(1).optional(),
     dish_type: z.string().trim().min(1).nullable().optional(),
+    flavor: z.string().trim().min(1).nullable().optional(),
     medication_category_id: z.string().trim().min(1).nullable().optional(),
     is_available: z.boolean().optional(),
     options: z.unknown().optional(),
@@ -342,6 +343,7 @@ export const updateProductSchema = z.object({
       image_url: z.string().min(1).nullable().optional(),
       category: z.string().trim().min(1).optional(),
       dish_type: z.string().trim().min(1).nullable().optional(),
+      flavor: z.string().trim().min(1).nullable().optional(),
       medication_category_id: z.string().trim().min(1).nullable().optional(),
       is_available: z.boolean().optional(),
       options: z.unknown().nullable().optional(),
@@ -365,6 +367,29 @@ export const createSupplementSchema = z.object({
     name: z.string().trim().min(1, 'Nom requis'),
     default_extra_price: z.coerce.number().min(0).optional(),
     in_catalog: z.boolean().optional(),
+  }),
+});
+
+/* ------------- Garnitures au niveau commerce (sauces / supplements) ------------- */
+
+/** Supplement du shop : prix 0.5 par defaut, plafonne a 100 DT. */
+export const restaurantSupplementInput = z.object({
+  name: z.string().trim().min(1),
+  extra_price: z.coerce.number().min(0).max(100).optional(),
+  for_fricasse: z.boolean().optional(),
+});
+
+/** Sauce du shop (gratuite, jamais tarifée). */
+export const restaurantSauceInput = z.object({
+  name: z.string().trim().min(1),
+});
+
+/** Payload REPLACE-ALL des garnitures d'un commerce. */
+export const updateRestaurantExtrasSchema = z.object({
+  params: idParam,
+  body: z.object({
+    supplements: z.array(restaurantSupplementInput).max(200),
+    sauces: z.array(restaurantSauceInput).max(200),
   }),
 });
 

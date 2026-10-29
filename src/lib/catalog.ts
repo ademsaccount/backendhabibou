@@ -1,6 +1,7 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 
 import { ApiError } from './errors';
+import { applicableSauces, applicableSupplements, sameName } from './categoryRules';
 
 /** Client Prisma : soit une transaction, soit le client principal (seed). */
 type Db = Prisma.TransactionClient | PrismaClient;
@@ -27,13 +28,22 @@ export type SupplementInput = {
 
 export type ProductIngredientDto = { id: string; name: string; sort_order: number };
 
+/** source 'catalog' = lié au produit (ProductSupplement) ; 'shop' = garniture du commerce. */
 export type ProductSupplementDto = {
   id: string;
   name: string;
-  // Prix effectif pour ce produit : override > défaut catalogue.
+  // Prix effectif pour ce produit : override > défaut catalogue (niveau produit),
+  // extra_price (niveau commerce). 
   extra_price: number;
   default_extra_price: number;
   in_catalog: boolean;
+  source: 'catalog' | 'shop';
+};
+
+/** Garnitures d'un commerce, par restaurant (chargées 1x, jamais en N+1). */
+export type ShopExtras = {
+  supplements: { id: string; restaurant_id: string; name: string; extra_price: number; for_fricasse: boolean }[];
+  sauces: { id: string; restaurant_id: string; name: string }[];
 };
 
 /** Ingrédients + suppléments d'un produit (triés), pour include Prisma. */
@@ -65,11 +75,79 @@ type CatalogRowsShape = {
 export type ProductWithCatalogs<T extends object> = Omit<T, 'ingredients' | 'supplements'> & {
   ingredients: ProductIngredientDto[];
   supplements: ProductSupplementDto[];
+  /** Noms des sauces shop applicables (selon dish_type) — gratuites. */
+  sauces: string[];
 };
 
-/** Aplatit les lignes de liaison en DTOs lisibles par l'app (ingrédients + suppléments). */
-export function withCatalogs<T extends object>(product: T): ProductWithCatalogs<T> {
-  const rows = product as T & CatalogRowsShape;
+/**
+ * Charge les garnitures (supplements + sauces) de plusieurs commerces en 2 requêtes.
+ * Renvoie une map restaurant_id -> extras ; absente = commerce sans garniture.
+ */
+export async function loadShopExtras(
+  db: Prisma.TransactionClient | PrismaClient,
+  restaurantIds: string[],
+): Promise<Map<string, ShopExtras>> {
+  const ids = Array.from(new Set(restaurantIds)).filter(Boolean);
+  if (ids.length === 0) return new Map();
+  const [supplements, sauces] = await Promise.all([
+    db.restaurantSupplement.findMany({ where: { restaurant_id: { in: ids } }, orderBy: [{ sort_order: 'asc' }, { name: 'asc' }] }),
+    db.restaurantSauce.findMany({ where: { restaurant_id: { in: ids } }, orderBy: [{ sort_order: 'asc' }, { name: 'asc' }] }),
+  ]);
+  const map = new Map<string, ShopExtras>();
+  for (const row of supplements) {
+    const extras = map.get(row.restaurant_id) ?? { supplements: [], sauces: [] };
+    extras.supplements.push({
+      id: row.id,
+      restaurant_id: row.restaurant_id,
+      name: row.name,
+      extra_price: row.extra_price,
+      for_fricasse: row.for_fricasse,
+    });
+    map.set(row.restaurant_id, extras);
+  }
+  for (const row of sauces) {
+    const extras = map.get(row.restaurant_id) ?? { supplements: [], sauces: [] };
+    extras.sauces.push({ id: row.id, restaurant_id: row.restaurant_id, name: row.name });
+    map.set(row.restaurant_id, extras);
+  }
+  return map;
+}
+
+/**
+ * Merges shop-level extras into a product DTO: applicable supplements appended
+ * (produit gagne sur conflit de nom) + sauces applicables (gratuites).
+ * Nécessite product.dish_type et product.restaurant_id.
+ */
+export function applyShopExtras<T extends object>(
+  product: T,
+  extras?: ShopExtras,
+): ProductWithCatalogs<T> & { flavor?: string | null } {
+  const rows = product as T & CatalogRowsShape & { dish_type?: string | null; restaurant_id?: string };
+  const dishType = rows.dish_type ?? null;
+
+  const productSupplements: ProductSupplementDto[] = (rows.supplements ?? []).map((row) => ({
+    id: row.supplement_id,
+    name: row.supplement.name,
+    extra_price: row.extra_price_override ?? row.supplement.default_extra_price,
+    default_extra_price: row.supplement.default_extra_price,
+    in_catalog: row.supplement.in_catalog,
+    source: 'catalog' as const,
+  }));
+
+  const shopSupplements = extras
+    ? applicableSupplements(dishType, extras.supplements)
+        .filter((shop) => !productSupplements.some((p) => sameName(p.name, shop.name)))
+        .map((shop) => ({
+          id: shop.id,
+          name: shop.name,
+          extra_price: shop.extra_price,
+          default_extra_price: shop.extra_price,
+          in_catalog: false,
+          source: 'shop' as const,
+        }))
+    : [];
+  const sauces = extras ? applicableSauces(dishType, extras.sauces).map((s) => s.name) : [];
+
   return {
     ...product,
     ingredients: (rows.ingredients ?? []).map((row) => ({
@@ -77,14 +155,17 @@ export function withCatalogs<T extends object>(product: T): ProductWithCatalogs<
       name: row.ingredient.name,
       sort_order: row.sort_order,
     })),
-    supplements: (rows.supplements ?? []).map((row) => ({
-      id: row.supplement_id,
-      name: row.supplement.name,
-      extra_price: row.extra_price_override ?? row.supplement.default_extra_price,
-      default_extra_price: row.supplement.default_extra_price,
-      in_catalog: row.supplement.in_catalog,
-    })),
-  } as ProductWithCatalogs<T>;
+    supplements: [...productSupplements, ...shopSupplements],
+    sauces,
+  } as ProductWithCatalogs<T> & { flavor?: string | null };
+}
+
+/** Aplatit les lignes de liaison en DTOs lisibles par l'app (ingrédients + suppléments). */
+export function withCatalogs<T extends object>(
+  product: T,
+  extras?: ShopExtras,
+): ProductWithCatalogs<T> {
+  return applyShopExtras(product, extras);
 }
 
 async function resolveIngredient(tx: Db, row: IngredientInput, adminId?: string): Promise<string | null> {

@@ -415,6 +415,147 @@ async function main() {
   await expect('reactiver seed-resto-2', 'PUT', '/admin/restaurants/seed-resto-2', { token: admin, body: { is_open: true } }, 200);
   await expect('DELETE restaurant inexistant → 404', 'DELETE', `/admin/restaurants/${stamp}-nope`, { token: admin }, 404);
 
+  console.log('— Admin : flavor + garnitures shop (extras) —');
+  const extrasResto = await expect('POST /admin/restaurants (extras)', 'POST', '/admin/restaurants', {
+    token: admin,
+    body: {
+      name: `Smoke Extras ${stamp}`,
+      category: 'snack',
+      address: '3 Rue Garnitures',
+      latitude: 36.8065,
+      longitude: 10.1815,
+      is_open: true,
+      opening_hours: { open: '09:00', close: '22:30' },
+    },
+  }, 201);
+
+  // flavor : create + update + read.
+  const flavorProd = await expect('POST product avec flavor', 'POST', `/admin/restaurants/${extrasResto.data.id}/products`, {
+    token: admin,
+    body: { name: 'Makloub Thon', price: 12, dish_type: 'Makloub', flavor: 'Thon fromage' },
+  }, 201);
+  check('flavor cree', flavorProd.data?.flavor === 'Thon fromage', JSON.stringify(flavorProd.data)?.slice(0, 200));
+  await expect('PUT flavor', 'PUT', `/admin/products/${flavorProd.data.id}`, {
+    token: admin,
+    body: { flavor: 'Poulet' },
+  }, 200);
+  const flavorRead = await expect('GET flavor round-trip', 'GET', `/products/${flavorProd.data.id}`, {}, 200);
+  check('flavor persistee', flavorRead.data?.flavor === 'Poulet', JSON.stringify(flavorRead.data?.flavor));
+  await expect('PUT flavor null', 'PUT', `/admin/products/${flavorProd.data.id}`, {
+    token: admin,
+    body: { flavor: null },
+  }, 200);
+  const flavorNull = await expect('GET flavor effacee', 'GET', `/products/${flavorProd.data.id}`, {}, 200);
+  check('flavor = null', flavorNull.data?.flavor === null, JSON.stringify(flavorNull.data?.flavor));
+
+  // PUT extras : replace-all + dedupe casse-insensible + prix par defaut 0.5.
+  await expect('PUT extras (replace-all)', 'PUT', `/admin/restaurants/${extrasResto.data.id}/extras`, {
+    token: admin,
+    body: {
+      supplements: [
+        { name: 'Thon', extra_price: 2.5 },
+        { name: 'Kwika', for_fricasse: true },
+        { name: 'thon', extra_price: 9 }, // doublon casse-insensible -> ignore
+      ],
+      sauces: [
+        { name: 'Harissa' },
+        { name: 'Mayonnaise' },
+        { name: 'harissa' }, // doublon -> ignore
+      ],
+    },
+  }, 200);
+  const extrasRead = await expect('GET extras', 'GET', `/admin/restaurants/${extrasResto.data.id}/extras`, { token: admin }, 200);
+  check('2 supplements (dedupe)', extrasRead.data?.supplements?.length === 2, JSON.stringify(extrasRead.data?.supplements));
+  check('2 sauces (dedupe)', extrasRead.data?.sauces?.length === 2, JSON.stringify(extrasRead.data?.sauces));
+  const thonRow = extrasRead.data?.supplements?.find((s) => s.name === 'Thon');
+  check('Thon prix = 2.5', thonRow?.extra_price === 2.5 && thonRow?.for_fricasse === false, JSON.stringify(thonRow));
+  const kwikaRow = extrasRead.data?.supplements?.find((s) => s.name === 'Kwika');
+  check('Kwika prix defaut 0.5 + for_fricasse', kwikaRow?.extra_price === 0.5 && kwikaRow?.for_fricasse === true, JSON.stringify(kwikaRow));
+
+  // Supplement produit de même nom : le niveau produit gagne.
+  const tacosProd = await expect('POST Tacos (supplements shop + sauces)', 'POST', `/admin/restaurants/${extrasResto.data.id}/products`, {
+    token: admin,
+    body: {
+      name: 'Tacos Smoke',
+      price: 19,
+      dish_type: 'Tacos',
+      supplements: [{ name: 'Thon', default_extra_price: 9, add_to_catalog: false }],
+    },
+  }, 201);
+  const tacosDetail = await expect('GET Tacos detail', 'GET', `/products/${tacosProd.data.id}`, {}, 200);
+  check(
+    'Tacos : sauces shop presentes',
+    Array.isArray(tacosDetail.data?.sauces) && tacosDetail.data.sauces.includes('Harissa') && tacosDetail.data.sauces.includes('Mayonnaise'),
+    JSON.stringify(tacosDetail.data?.sauces),
+  );
+  check(
+    'Tacos : supplement Thon produit gagne (9)',
+    tacosDetail.data?.supplements?.find((s) => s.name === 'Thon')?.extra_price === 9 &&
+      tacosDetail.data?.supplements?.find((s) => s.name === 'Thon')?.source === 'catalog',
+    JSON.stringify(tacosDetail.data?.supplements),
+  );
+  check(
+    'Tacos : Kwika shop applique (source shop)',
+    tacosDetail.data?.supplements?.some((s) => s.name === 'Kwika' && s.source === 'shop' && s.extra_price === 0.5),
+    JSON.stringify(tacosDetail.data?.supplements),
+  );
+  const tacosList = await expect('GET /products?restaurant_id (Tacos)', 'GET', `/products?restaurant_id=${tacosProd.data.restaurant_id}`, {}, 200);
+  check(
+    'liste : Tacos recoit sauces + supplement shop',
+    tacosList.data?.some((p) => p.name === 'Tacos Smoke' && Array.isArray(p.sauces) && p.sauces.includes('Harissa') && p.supplements.some((s) => s.name === 'Kwika' && s.source === 'shop')),
+    JSON.stringify(tacosList.data?.find((p) => p.name === 'Tacos Smoke'))?.slice(0, 400),
+  );
+
+  const fricasseeProd = await expect('POST Fricassé', 'POST', `/admin/restaurants/${extrasResto.data.id}/products`, {
+    token: admin,
+    body: { name: 'Fricassé Smoke', price: 8, dish_type: 'Fricassé' },
+  }, 201);
+  const fricasseeDetail = await expect('GET Fricassé detail', 'GET', `/products/${fricasseeProd.data.id}`, {}, 200);
+  check('Fricassé : aucune sauce', JSON.stringify(fricasseeDetail.data?.sauces) === '[]', JSON.stringify(fricasseeDetail.data?.sauces));
+  check(
+    'Fricassé : uniquement for_fricasse=true (Kwika)',
+    fricasseeDetail.data?.supplements?.length === 1 && fricasseeDetail.data.supplements[0].name === 'Kwika' && fricasseeDetail.data.supplements[0].source === 'shop',
+    JSON.stringify(fricasseeDetail.data?.supplements),
+  );
+
+  const pizzaProd = await expect('POST Pizza', 'POST', `/admin/restaurants/${extrasResto.data.id}/products`, {
+    token: admin,
+    body: { name: 'Pizza Smoke', price: 22, dish_type: 'Pizza' },
+  }, 201);
+  const pizzaDetailSmoke = await expect('GET Pizza detail', 'GET', `/products/${pizzaProd.data.id}`, {}, 200);
+  check('Pizza : aucune sauce', JSON.stringify(pizzaDetailSmoke.data?.sauces) === '[]', JSON.stringify(pizzaDetailSmoke.data?.sauces));
+  check('Pizza : aucun supplement shop', JSON.stringify(pizzaDetailSmoke.data?.supplements) === '[]', JSON.stringify(pizzaDetailSmoke.data?.supplements));
+
+  // Pricing commande : supplement shop tarifé côté serveur, sauce gratuite.
+  const extrasOrder = await expect('POST /orders (supplement shop)', 'POST', '/orders', {
+    token: clientToken,
+    body: {
+      address_id: addressId,
+      payment_method: 'cash',
+      // Structure proposee : { "Sauces": [...], "Suppléments": [...] }
+      items: [
+        {
+          product_id: tacosProd.data.id,
+          quantity: 1,
+          options: { Sauces: ['Harissa'], 'Suppléments': ['Thon'] },
+        },
+      ],
+    },
+  }, 201);
+  // 19 tacos + 9 Thon (prix produit, sauce gratuite) + 15 frais = 43
+  check('prix supplement shop = 9 (sauce gratuite)', extrasOrder.data?.total_price === 43, `got ${extrasOrder.data?.total_price}`);
+
+  // Nettoyage : produits jamais commandes supprimés, le Tacos commandé passe en
+  // soft-delete (is_available=false), le commerce avec commande refuse le delete.
+  await expect('DELETE Fricassé', 'DELETE', `/admin/products/${fricasseeProd.data.id}`, { token: admin }, 204);
+  await expect('DELETE Pizza', 'DELETE', `/admin/products/${pizzaProd.data.id}`, { token: admin }, 204);
+  await expect('DELETE Makloub', 'DELETE', `/admin/products/${flavorProd.data.id}`, { token: admin }, 204);
+  const softDeletedTacos = await expect('DELETE Tacos commandé (soft)', 'DELETE', `/admin/products/${tacosProd.data.id}`, { token: admin }, 200);
+  check('soft delete : is_available=false', softDeletedTacos.data?.is_available === false, JSON.stringify(softDeletedTacos.data)?.slice(0, 200));
+  const delExtrasResto = await expect('DELETE restaurant extras (avec commande) → 409', 'DELETE', `/admin/restaurants/${extrasResto.data.id}`, { token: admin }, 409);
+  check('code HAS_ORDERS (extras)', delExtrasResto.data?.error?.code === 'HAS_ORDERS', JSON.stringify(delExtrasResto.data));
+
+
   console.log('— Notifications —');
   const notifs = await expect('GET /notifications/me', 'GET', '/notifications/me', { token: clientToken }, 200);
   check('notifications recues', notifs.data?.length >= 3, `got ${notifs.data?.length}`);

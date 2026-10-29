@@ -20,11 +20,13 @@ import {
   updateLivreurSchema,
   updateMedicationCategorySchema,
   updateProductSchema,
+  updateRestaurantExtrasSchema,
   updateRestaurantSchema,
   updateStorySchema,
 } from '../schemas';
 import {
   productCatalogInclude,
+  loadShopExtras,
   syncProductIngredients,
   syncProductSupplements,
   withCatalogs,
@@ -171,7 +173,11 @@ adminRouter.get(
       include: { products: { include: productCatalogInclude, orderBy: [{ category: 'asc' }, { name: 'asc' }] } },
     });
     if (!restaurant) throw ApiError.notFound('Commerce introuvable');
-    res.json({ ...restaurant, products: restaurant.products.map((p) => withCatalogs(p)) });
+    const extrasMap = await loadShopExtras(prisma, [restaurant.id]);
+    res.json({
+      ...restaurant,
+      products: restaurant.products.map((p) => withCatalogs(p, extrasMap.get(p.restaurant_id))),
+    });
   }),
 );
 
@@ -212,6 +218,104 @@ adminRouter.delete(
       await tx.restaurant.delete({ where: { id: existing.id } });
     }, TX_OPTS);
     res.status(204).send();
+  }),
+);
+
+/* ---------------- Garnitures du commerce (supplements + sauces shop) ---------------- */
+
+type ExtrasSupplementRow = { id: string; name: string; extra_price: number; for_fricasse: boolean };
+type ExtrasSauceRow = { id: string; name: string };
+
+function extrasDto(supplements: ExtrasSupplementRow[], sauces: ExtrasSauceRow[]) {
+  return {
+    supplements: supplements.map((s) => ({
+      id: s.id,
+      name: s.name,
+      extra_price: s.extra_price,
+      for_fricasse: s.for_fricasse,
+    })),
+    sauces: sauces.map((s) => ({ id: s.id, name: s.name })),
+  };
+}
+
+function fetchExtras(restaurantId: string) {
+  return Promise.all([
+    prisma.restaurantSupplement.findMany({
+      where: { restaurant_id: restaurantId },
+      orderBy: [{ sort_order: 'asc' }, { name: 'asc' }],
+    }),
+    prisma.restaurantSauce.findMany({
+      where: { restaurant_id: restaurantId },
+      orderBy: [{ sort_order: 'asc' }, { name: 'asc' }],
+    }),
+  ]);
+}
+
+adminRouter.get(
+  '/restaurants/:id/extras',
+  validate({ params: idParam }),
+  asyncHandler(async (req, res) => {
+    const restaurant = await prisma.restaurant.findUnique({ where: { id: req.params.id } });
+    if (!restaurant) throw ApiError.notFound('Commerce introuvable');
+    const [supplements, sauces] = await fetchExtras(restaurant.id);
+    res.json(extrasDto(supplements, sauces));
+  }),
+);
+
+adminRouter.put(
+  '/restaurants/:id/extras',
+  validate(updateRestaurantExtrasSchema),
+  asyncHandler(async (req, res) => {
+    const body = req.validated?.body as {
+      supplements: { name: string; extra_price?: number; for_fricasse?: boolean }[];
+      sauces: { name: string }[];
+    };
+    const restaurant = await prisma.restaurant.findUnique({ where: { id: req.params.id } });
+    if (!restaurant) throw ApiError.notFound('Commerce introuvable');
+
+    // REPLACE-ALL : la liste envoyee remplace l'existante (dedupe casse-insensible).
+    const seenSupplements = new Set<string>();
+    const supplementRows = body.supplements
+      .map((row) => ({ ...row, name: row.name.trim() }))
+      .filter((row) => {
+        const key = row.name.toLowerCase();
+        if (seenSupplements.has(key)) return false;
+        seenSupplements.add(key);
+        return true;
+      })
+      .map((row, index) => ({
+        restaurant_id: restaurant.id,
+        name: row.name,
+        extra_price: row.extra_price ?? 0.5,
+        for_fricasse: row.for_fricasse ?? false,
+        sort_order: index,
+      }));
+
+    const seenSauces = new Set<string>();
+    const sauceRows = body.sauces
+      .map((row) => ({ name: row.name.trim() }))
+      .filter((row) => {
+        if (!row.name) return false;
+        const key = row.name.toLowerCase();
+        if (seenSauces.has(key)) return false;
+        seenSauces.add(key);
+        return true;
+      })
+      .map((row, index) => ({ restaurant_id: restaurant.id, name: row.name, sort_order: index }));
+
+    const lists = await prisma.$transaction(async (tx) => {
+      await tx.restaurantSupplement.deleteMany({ where: { restaurant_id: restaurant.id } });
+      await tx.restaurantSauce.deleteMany({ where: { restaurant_id: restaurant.id } });
+      if (supplementRows.length > 0) {
+        await tx.restaurantSupplement.createMany({ data: supplementRows });
+      }
+      if (sauceRows.length > 0) {
+        await tx.restaurantSauce.createMany({ data: sauceRows });
+      }
+      // Relecture ordonnée côté DB (sort_order, name).
+      return fetchExtras(restaurant.id);
+    }, TX_OPTS);
+    res.json(extrasDto(lists[0], lists[1]));
   }),
 );
 
@@ -345,7 +449,8 @@ adminRouter.get(
       include: productInclude,
       orderBy: [{ category: 'asc' }, { name: 'asc' }],
     });
-    res.json(products.map((p) => withCatalogs(p)));
+    const extrasMap = await loadShopExtras(prisma, [restaurant.id]);
+    res.json(products.map((p) => withCatalogs(p, extrasMap.get(p.restaurant_id))));
   }),
 );
 
@@ -368,7 +473,8 @@ adminRouter.post(
       await syncProductSupplements(tx, created.id, supplements, req.user!.id);
       return tx.product.findUnique({ where: { id: created.id }, include: productInclude });
     }, TX_OPTS);
-    res.status(201).json(withCatalogs(product!));
+    const extrasMap = await loadShopExtras(prisma, [restaurant.id]);
+    res.status(201).json(withCatalogs(product!, extrasMap.get(restaurant.id)));
   }),
 );
 
@@ -393,7 +499,8 @@ adminRouter.put(
       await syncProductSupplements(tx, updated.id, supplements, req.user!.id);
       return tx.product.findUnique({ where: { id: updated.id }, include: productInclude });
     }, TX_OPTS);
-    res.json(withCatalogs(product!));
+    const extrasMap = await loadShopExtras(prisma, [product!.restaurant_id]);
+    res.json(withCatalogs(product!, extrasMap.get(product!.restaurant_id)));
   }),
 );
 
@@ -410,7 +517,8 @@ adminRouter.delete(
         data: { is_available: false },
         include: productInclude,
       });
-      return res.json(withCatalogs(product));
+      const extrasMap = await loadShopExtras(prisma, [product.restaurant_id]);
+      return res.json(withCatalogs(product, extrasMap.get(product.restaurant_id)));
     }
     await prisma.product.delete({ where: { id: existing.id } });
     res.status(204).send();

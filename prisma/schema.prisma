@@ -157,6 +157,10 @@ model Restaurant {
   orders    Order[]
   reviews   Review[]
   stories   Story[]
+  // Garnitures au niveau du commerce (cochees une fois, appliquees automatiquement
+  // aux produits selon de leur dish_type — voir src/lib/categoryRules.ts).
+  restaurant_supplements RestaurantSupplement[]
+  restaurant_sauces      RestaurantSauce[]
   creator   User?      @relation("RestaurantCreatedBy", fields: [created_by_admin_id], references: [id])
 
   @@index([latitude, longitude])
@@ -175,6 +179,8 @@ model Product {
   // Type de plat transverse a tous les restaurants (Makloub, Pizza, Fricasse...)
   // -> filtre "Par type de plat" du flux Repas. Valeur libre saisie par l'admin.
   dish_type             String?
+  // Variante du plat ("Margherita" pour une Pizza, "Thon" pour un Makloub…).
+  flavor                String?
   // Tailles multiples (2+ : Medium/Large/...) : [{ label, price }].
   // Des que 2 tailles ou plus, price = min des tailles ("a partir de X").
   sizes                 Json?
@@ -248,6 +254,41 @@ model ProductSupplement {
 
   @@id([product_id, supplement_id])
   @@index([supplement_id])
+}
+
+// Supplement au niveau du commerce (garniture cochee une fois pour tout le shop) :
+// applique automatiquement aux produits selon leur dish_type via src/lib/categoryRules.ts.
+// Sans relation produit : il complete (ou coexiste avec) ProductSupplement.
+model RestaurantSupplement {
+  id            String  @id @default(uuid())
+  restaurant_id String
+  name          String
+  // Prix de l'ajout (DT) — 0.5 par defaut.
+  extra_price   Float   @default(0.5)
+  // true = aussi applique aux Fricasses (les sauces ne le sont JAMAIS).
+  for_fricasse  Boolean @default(false)
+  sort_order    Int     @default(0)
+  created_at    DateTime @default(now())
+
+  restaurant Restaurant @relation(fields: [restaurant_id], references: [id], onDelete: Cascade)
+
+  @@unique([restaurant_id, name])
+  @@index([restaurant_id])
+}
+
+// Sauce au niveau du commerce : gratuite, appliquee automatiquement (jamais aux
+// Fricasses) et jamais tarifée comme un supplement.
+model RestaurantSauce {
+  id            String  @id @default(uuid())
+  restaurant_id String
+  name          String
+  sort_order    Int     @default(0)
+  created_at    DateTime @default(now())
+
+  restaurant Restaurant @relation(fields: [restaurant_id], references: [id], onDelete: Cascade)
+
+  @@unique([restaurant_id, name])
+  @@index([restaurant_id])
 }
 
 // Categories de medicaments du flux Pharmacie â€” table configurable cote admin (pas en dur).

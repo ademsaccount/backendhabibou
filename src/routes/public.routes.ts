@@ -11,7 +11,7 @@ import {
   updateAddressSchema,
 } from '../schemas';
 import { haversineKm, roundKm } from '../lib/geo';
-import { productCatalogInclude, withCatalogs } from '../lib/catalog';
+import { loadShopExtras, productCatalogInclude, withCatalogs } from '../lib/catalog';
 import { isOpenNow } from '../lib/open';
 import type { Prisma } from '@prisma/client';
 
@@ -86,12 +86,19 @@ publicRouter.get(
       include: {
         products: {
           where: {},
+          include: productCatalogInclude,
           orderBy: [{ category: 'asc' }, { name: 'asc' }],
         },
       },
     });
     if (!restaurant) throw ApiError.notFound('Commerce introuvable');
-    res.json({ ...restaurant, is_open: isOpenNow(restaurant) });
+    // Garnitures du commerce : 1 double requête (pas de N+1 sur les produits).
+    const extrasMap = await loadShopExtras(prisma, [restaurant.id]);
+    res.json({
+      ...restaurant,
+      is_open: isOpenNow(restaurant),
+      products: restaurant.products.map((p) => withCatalogs(p, extrasMap.get(p.restaurant_id))),
+    });
   }),
 );
 
@@ -168,7 +175,9 @@ publicRouter.get(
       orderBy: [{ category: 'asc' }, { name: 'asc' }],
       take: 300,
     });
-    res.json(products.map(withOpenRestaurant));
+    // Garnitures shop pour les sauces/merges : 1 double requête pour tous les commerces.
+    const extrasMap = await loadShopExtras(prisma, products.map((p) => p.restaurant_id));
+    res.json(products.map((p) => withCatalogs(withOpenRestaurant(p), extrasMap.get(p.restaurant_id))));
   }),
 );
 
@@ -206,7 +215,8 @@ publicRouter.get(
       },
     });
     if (!product) throw ApiError.notFound('Produit introuvable');
-    res.json(withCatalogs(withOpenRestaurant(product)));
+    const extrasMap = await loadShopExtras(prisma, [product.restaurant_id]);
+    res.json(withCatalogs(withOpenRestaurant(product), extrasMap.get(product.restaurant_id)));
   }),
 );
 

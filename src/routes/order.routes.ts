@@ -12,6 +12,7 @@ import { pushAdmins, pushNewMessageToUser, pushOrderStatusToUser } from '../lib/
 import { emitToAdmins, emitToOrder } from '../socket/io';
 import { createPaymentIntent, stripeEnabled } from '../lib/stripe';
 import { orderInclude } from '../lib/orderInclude';
+import { mergeSupplementEntries } from '../lib/categoryRules';
 import type { Prisma } from '@prisma/client';
 
 /** Recolte {name, price} dans le JSON de catalog d'options d'un produit. */
@@ -108,15 +109,37 @@ orderRouter.post(
       const byId = new Map(products.map((p) => [p.id, p]));
 
       // Catalogue de suppléments par produit (prix calculé côté serveur, prix client ignoré).
+      // Implique les garnitures au niveau commerce (RestaurantSupplement) applicables
+      // selon le dish_type du produit (voir src/lib/categoryRules.ts) ; le niveau
+      // produit gagne en cas de conflit de nom (casse/accents ignorés).
+      //
+      // Structure `options` du client — proposée (et rétro-compatible) :
+      //   { "Sauces": ["Harissa", ...], "Suppléments": ["Thon", ...] }
+      // (ou tout objet fini de strings/objets {name}, comme avant).
+      // - Sauces shop : TOUJOURS GRATUITES — elles ne font JAMAIS partie de ce
+      //   catalogue de prix (aucun risque qu'une sauce soit tarifée comme un
+      //   supplément) ; elles se contentent d'être sélectionnées dans options.
+      // - Suppléments shop : prix = RestaurantSupplement.extra_price, recalculé
+      //   ici côté serveur (prix client ignoré).
       const supplementRows = await tx.productSupplement.findMany({
         where: { product_id: { in: productIds } },
         include: { supplement: true },
       });
+      const shopSupplementRows = await tx.restaurantSupplement.findMany({
+        where: { restaurant_id: { in: [...new Set(products.map((p) => p.restaurant_id))] } },
+      });
+      const shopSupplementsByRestaurant = new Map<string, typeof shopSupplementRows>();
+      for (const row of shopSupplementRows) {
+        const list = shopSupplementsByRestaurant.get(row.restaurant_id) ?? [];
+        list.push(row);
+        shopSupplementsByRestaurant.set(row.restaurant_id, list);
+      }
       const supplementsByProduct = new Map<string, { name: string; price: number }[]>();
       for (const row of supplementRows) {
         const list = supplementsByProduct.get(row.product_id) ?? [];
         list.push({
           name: row.supplement.name,
+          // NON MODIFIÉ : nom + prix du supplément produit (niveau produit).
           price: row.extra_price_override ?? row.supplement.default_extra_price,
         });
         supplementsByProduct.set(row.product_id, list);
@@ -138,7 +161,15 @@ orderRouter.post(
 
         const catalog: { name: string; price: number }[] = [];
         collectCatalogEntries(product.options, catalog);
-        catalog.push(...(supplementsByProduct.get(product.id) ?? []));
+        // Suppléments produit + suppléments shop applicables au dish_type
+        // (prix serveur). Les sauces ne sont JAMAIS poussées ici (gratuites).
+        catalog.push(
+          ...mergeSupplementEntries(
+            product.dish_type,
+            shopSupplementsByRestaurant.get(product.restaurant_id) ?? [],
+            supplementsByProduct.get(product.id) ?? [],
+          ),
+        );
 
         // Taille : prix résolu côté serveur depuis Product.sizes (jamais le prix client).
         const sizes = parseProductSizes(product.sizes);
