@@ -50,8 +50,84 @@ function collectSelectedNames(node: unknown, out: string[]): void {
   }
 }
 
+/** Entree selectionnee recoltée : {name, qty} (qty absent/ancien payload = 1). */
+type SelectedEntry = { name: string; qty: number; key: string };
+
+/**
+ * Recolte les {name, qty} choisis :
+ *  - "Chaine"                    → qty 1 (payload historique) ;
+ *  - { name, price }             → qty 1 (ancien client, price ignoré) ;
+ *  - { name, qty }               → qty (nouveaux clients) ;
+ *  - tout autre objet            → récursion sur les valeurs.
+ * Le `qty` est validé a part (validateOptionQuantities) : ici on récupère
+ * seulement les entiers valides — tout autre valeur ne doit jamais arriver.
+ */
+function collectSelectedEntries(node: unknown, out: SelectedEntry[]): void {
+  if (typeof node === 'string') {
+    out.push({ name: node, qty: 1, key: normalizeDishType(node) });
+    return;
+  }
+  if (Array.isArray(node)) {
+    for (const item of node) collectSelectedEntries(item, out);
+    return;
+  }
+  if (node && typeof node === 'object') {
+    const obj = node as Record<string, unknown>;
+    if (typeof obj.name === 'string' && obj.name.trim()) {
+      const q = obj.qty;
+      out.push({
+        name: obj.name,
+        // validation faite en amont : on ne peut pas recevoir un qty invalide ici
+        qty: typeof q === 'number' && Number.isInteger(q) ? q : 1,
+        key: normalizeDishType(obj.name),
+      });
+    }
+    for (const [key, value] of Object.entries(obj)) {
+      if (key !== 'name' && key !== 'qty') {
+        collectSelectedEntries(value, out);
+      }
+    }
+  }
+}
+
+/**
+ * Valide les quantités du payload `options` de chaque item : TOUT champ `qty`
+ * présent doit être un entier dans [1, MAX_EXTRA_QTY] — y compris dans les
+ * groupes GRATUITS (Sauces / Salades). Sinon → 400 INVALID_QUANTITY.
+ */
+function validateOptionQuantities(items: { options?: unknown }[] | undefined): void {
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      for (const entry of node) walk(entry);
+      return;
+    }
+    if (node && typeof node === 'object') {
+      const obj = node as Record<string, unknown>;
+      for (const [key, value] of Object.entries(obj)) {
+        if (key === 'qty') {
+          if (
+            (typeof value === 'number' && (!Number.isInteger(value) || value < 1 || value > MAX_EXTRA_QTY)) ||
+            (typeof value !== 'number' && value !== undefined && value !== null)
+          ) {
+            throw ApiError.badRequest(
+              `Quantité invalide (1 à ${MAX_EXTRA_QTY} attendus)`,
+              'INVALID_QUANTITY',
+            );
+          }
+        } else if (value && typeof value === 'object') {
+          walk(value);
+        }
+      }
+    }
+  };
+  for (const item of items ?? []) walk(item.options);
+}
+
 /** Clés de groupes d'options GRATUITES (sauces et salades du commerce). */
 const FREE_OPTION_KEYS = new Set(['sauces', 'salades']);
+
+/** Quantité max d'une garniture choisie ({name, qty}) — alignée sur le client. */
+export const MAX_EXTRA_QTY = 3;
 
 /**
  * Recolte les noms choisis sous les groupes gratuits (« Sauces », « Salades »,
@@ -79,18 +155,30 @@ function optionDelta(catalogOptions: unknown, selectedOptions: unknown): number 
   collectCatalogEntries(catalogOptions, entries);
   if (entries.length === 0) return 0;
   const byName = new Map(entries.map((e) => [e.name, e.price]));
-  const names: string[] = [];
-  collectSelectedNames(selectedOptions, names);
-  const seen = new Set<string>();
+  const selected: SelectedEntry[] = [];
+  collectSelectedEntries(selectedOptions, selected);
+  // JAMAIS sommé : un même nom répété dans le payload garde sa MEILLEURE qty
+  // (dédupe par nom normalisé casse/accents) — un client ne peut pas
+  // s'auto-facturer 2 + 3 en envoyant le même supplément deux fois.
+  const best = new Map<string, SelectedEntry>();
+  for (const entry of selected) {
+    const key = normalizeDishType(entry.name);
+    if (!key) continue;
+    const current = best.get(key);
+    if (!current || entry.qty > current.qty) best.set(key, entry);
+  }
+  // Repli par nom normalisé : le gagnant du dédupe garde son nom BRUT
+  // (« thon »), le catalogue étant classé par nom exact (« Thon ») — sinon
+  // le doublon casse-insensible serait facturé 0 au lieu de qty 3.
+  const byNameNorm = new Map<string, number>();
+  for (const [n, p] of byName) byNameNorm.set(normalizeDishType(n), p);
   let delta = 0;
-  for (const name of names) {
-    if (seen.has(name)) continue;
-    seen.add(name);
+  for (const { name, qty, key } of best.values()) {
     // Garde-fou : un nom sous « Sauces »/« Salades » n'est JAMAIS facturé,
     // même si une entrée prix du catalogue porte ce nom exact (limitation
     // connue d'optionDelta : il matche les noms sans tenir compte du groupe).
     if (freeNames.has(normalizeDishType(name))) continue;
-    delta += byName.get(name) ?? 0;
+    delta += (byName.get(name) ?? byNameNorm.get(key) ?? 0) * qty;
   }
   return delta;
 }
@@ -122,6 +210,10 @@ orderRouter.post(
       payment_method: 'card' | 'cash';
       items: { product_id: string; quantity: number; notes?: string; options?: unknown; size_label?: string }[];
     };
+
+    // Quantités des garnitures : entier 1..MAX_EXTRA_QTY, tous groupes
+    // (y compris Sauces/Salades gratuites) — sinon 400 INVALID_QUANTITY.
+    validateOptionQuantities(body.items);
 
     const address = await prisma.address.findUnique({ where: { id: body.address_id } });
     if (!address || address.user_id !== userId) throw ApiError.notFound('Adresse introuvable');

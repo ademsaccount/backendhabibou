@@ -76,18 +76,26 @@ async function main() {
   await expect('GET /auth/me', 'GET', '/auth/me', { token: clientToken }, 200);
   await expect('register dup email → 409', 'POST', '/auth/register', { body: { email: 'client@habichou.ma', password: 'xxxxxxxx', full_name: 'Dup' } }, 409);
 
-  console.log('— Routes livreur désactivées (404) —');
-  await expect('GET /admin/livreurs → 404', 'GET', '/admin/livreurs', { token: admin }, 404);
-  await expect('PUT /admin/livreurs/:id → 404', 'PUT', `/admin/livreurs/${stamp}`, { token: admin, body: { is_online: false } }, 404);
-  await expect('GET /admin/livreurs/map → 404', 'GET', '/admin/livreurs/map', { token: admin }, 404);
-  await expect('PUT /admin/orders/:id/assign → 404', 'PUT', `/admin/orders/${stamp}/assign`, { token: admin, body: { auto: true } }, 404);
-  await expect('GET /livreur/profile → 404', 'GET', '/livreur/profile', { token: admin }, 404);
-  await expect('PUT /livreur/online → 404', 'PUT', '/livreur/online', { token: admin, body: { is_online: true } }, 404);
-  await expect('GET /livreur/orders/assigned → 404', 'GET', '/livreur/orders/assigned', { token: admin }, 404);
-  await expect('PUT /livreur/location → 404', 'PUT', '/livreur/location', { token: admin, body: { lat: 33.57, lng: -7.59 } }, 404);
-  await expect('GET /livreur/stats → 404', 'GET', '/livreur/stats', { token: admin }, 404);
+  console.log('— Routes livreurs (gérées par l\'admin) / profil livreur protégé —');
+  // L'ancien désordre « admin = unique livreur → tout en 404 » a été remplacé
+  // par la reprise de la gestion livreurs : l'admin liste/gère les profils et
+  // les routes /livreur/* sont réservées au rôle livreur (403 pour un admin).
+  await expect('GET /admin/livreurs (l\'admin gère les livreurs)', 'GET', '/admin/livreurs', { token: admin }, 200);
+  await expect('PUT /admin/livreurs/:id inexistant → 404', 'PUT', `/admin/livreurs/${stamp}`, { token: admin, body: { is_online: false } }, 404);
+  await expect('GET /admin/livreurs/map absent → 404', 'GET', '/admin/livreurs/map', { token: admin }, 404);
+  await expect('PUT /admin/orders/:id/assign retiré → 404', 'PUT', `/admin/orders/${stamp}/assign`, { token: admin, body: { auto: true } }, 404);
+  await expect('GET /livreur/profile (token admin) → 403', 'GET', '/livreur/profile', { token: admin }, 403);
+  await expect('PUT /livreur/online (token admin) → 403', 'PUT', '/livreur/online', { token: admin, body: { is_online: true } }, 403);
+  await expect('GET /livreur/orders/assigned (token admin) → 403', 'GET', '/livreur/orders/assigned', { token: admin }, 403);
+  await expect('PUT /livreur/location (token admin) → 403', 'PUT', '/livreur/location', { token: admin, body: { lat: 33.57, lng: -7.59 } }, 403);
+  await expect('GET /livreur/stats (token admin) → 403', 'GET', '/livreur/stats', { token: admin }, 403);
+  await expect('GET /admin/livreurs sans session → 401', 'GET', '/admin/livreurs', {}, 401);
 
-  console.log('— Demande spécifique (custom requests) —');
+  console.log('— Demande spécifique (custom requests, commande liée directe) —');
+  // Contrat ACTUEL (code) : POST /custom-requests crée la demande ET la
+  // commande liée en une transaction (total = frais de livraison, cash).
+  // L'ancien cycle devis (quote/accept + commande sans items) a été retiré :
+  // l'admin accepte le devis… en traitant la commande liée incoming.
   await expect('POST /custom-requests sans adresse → 400', 'POST', '/custom-requests', {
     token: clientToken,
     body: { description_text: 'Livrez-moi un bouquet de fleurs' },
@@ -96,31 +104,23 @@ async function main() {
     token: clientToken,
     body: { description_text: 'Livrez-moi un bouquet de fleurs et un paquet de chocolats', address_id: 'seed-address-1', estimated_budget: 120 },
   }, 201);
-  const crId = crCreate.data?.id;
+  const crId = crCreate.data?.custom_request?.id;
   check('demande creee', Boolean(crId), JSON.stringify(crCreate.data)?.slice(0, 200));
+  check('commande liée crée (total = frais)', crCreate.data?.order?.total_price === crCreate.data?.order?.delivery_fee, JSON.stringify(crCreate.data?.order)?.slice(0, 200));
   await expect('GET /custom-requests/me', 'GET', '/custom-requests/me', { token: clientToken }, 200);
   await expect('GET /custom-requests/:id', 'GET', `/custom-requests/${crId}`, { token: clientToken }, 200);
   const crList = await expect('GET /admin/custom-requests', 'GET', '/admin/custom-requests', { token: admin }, 200);
   check('demande visible par admin', crList.data?.some((c) => c.id === crId), `got ${crList.data?.length}`);
-  await expect('commande avant devis → 400', 'POST', '/orders', {
+  // L'ancien devis (PUT :id/quote) n'existe plus → 404 « Route introuvable ».
+  const quoteGone = await api('PUT', `/admin/custom-requests/${crId}/quote`, { token: admin, body: { admin_quote_price: 100 } });
+  check('PUT quote retiré → 404', quoteGone.status === 404, `got ${quoteGone.status}`);
+  const acceptGone = await api('POST', `/custom-requests/${crId}/accept`, { token: clientToken });
+  check('POST accept retiré → 404', acceptGone.status === 404, `got ${acceptGone.status}`);
+  // POST /orders exige désormais un panier items — plus de commande « sur devis » sans items.
+  await expect('POST /orders sans items → 400', 'POST', '/orders', {
     token: clientToken,
-    body: { address_id: 'seed-address-1', payment_method: 'cash', custom_request_id: crId },
+    body: { address_id: 'seed-address-1', payment_method: 'cash' },
   }, 400);
-  await expect('PUT devis (quote)', 'PUT', `/admin/custom-requests/${crId}/quote`, { token: admin, body: { admin_quote_price: 100 } }, 200);
-  await expect('commande avant acceptation → 400', 'POST', '/orders', {
-    token: clientToken,
-    body: { address_id: 'seed-address-1', payment_method: 'cash', custom_request_id: crId },
-  }, 400);
-  await expect('client accepte le devis', 'POST', `/custom-requests/${crId}/accept`, { token: clientToken }, 200);
-  const crOrder = await expect('POST /orders (devis accepte)', 'POST', '/orders', {
-    token: clientToken,
-    body: { address_id: 'seed-address-1', payment_method: 'cash', custom_request_id: crId },
-  }, 201);
-  check('total = devis + frais (115)', crOrder.data?.total_price === 115, `got ${crOrder.data?.total_price}`);
-  await expect('deja commandee → 409', 'POST', '/orders', {
-    token: clientToken,
-    body: { address_id: 'seed-address-1', payment_method: 'cash', custom_request_id: crId },
-  }, 409);
 
   console.log('— Public —');
   const restos = await expect('GET /restaurants (geo)', 'GET', '/restaurants?lat=33.5731&lng=-7.5898', {}, 200);
@@ -408,11 +408,10 @@ async function main() {
   await expect('DELETE product jamais commande', 'DELETE', `/admin/products/${prod.data.id}`, { token: admin }, 204);
   await expect('DELETE restaurant sans commandes', 'DELETE', `/admin/restaurants/${resto2.data.id}`, { token: admin }, 204);
 
-  const delOrdered = await expect('DELETE restaurant avec commandes → 409', 'DELETE', '/admin/restaurants/seed-resto-2', { token: admin }, 409);
-  check('code HAS_ORDERS', delOrdered.data?.error?.code === 'HAS_ORDERS', JSON.stringify(delOrdered.data));
-  const closedResto = await expect('fermeture auto apres 409', 'GET', '/admin/restaurants/seed-resto-2', { token: admin }, 200);
-  check('is_open=false apres 409', closedResto.data?.is_open === false, `got ${closedResto.data?.is_open}`);
-  await expect('reactiver seed-resto-2', 'PUT', '/admin/restaurants/seed-resto-2', { token: admin, body: { is_open: true } }, 200);
+  // NOTE contrat API.md : DELETE restaurant = 204 CASCADE (commandes + produits
+  // supprimés). L'ancien garde « avec commandes → 409 HAS_ORDERS + fermeture
+  // auto » n'existe plus (il ne reste que le garde livreurs HAS_ORDERS) — le
+  // DELETE cascade d'un commerce commandé est vérifié plus bas (Smoke Extras).
   await expect('DELETE restaurant inexistant → 404', 'DELETE', `/admin/restaurants/${stamp}-nope`, { token: admin }, 404);
 
   console.log('— Admin : flavor + garnitures shop (extras) —');
@@ -614,7 +613,9 @@ async function main() {
       name: 'Tacos Smoke',
       price: 19,
       dish_type: 'Tacos',
-      supplements: [{ name: 'Thon', default_extra_price: 9, add_to_catalog: false }],
+      // Le prixProduit s'exprime en extra_price_override (default_extra_price
+      // ne surcharge JAMAIS une ligne existante du catalogue — ici le Thon seedé à 6).
+      supplements: [{ name: 'Thon', extra_price_override: 9, add_to_catalog: false }],
     },
   }, 201);
   const tacosDetail = await expect('GET Tacos detail', 'GET', `/products/${tacosProd.data.id}`, {}, 200);
@@ -716,7 +717,8 @@ async function main() {
   const extrasRead2 = await expect('GET extras après PUT partiel', 'GET', `/admin/restaurants/${extrasResto.data.id}/extras`, { token: admin }, 200);
   check(
     'salades inchangées après PUT sans liste salades',
-    JSON.stringify(extrasRead2.data?.salads) === JSON.stringify(['Laitue', 'Tomate']) && extrasRead2.data?.salads?.length === 2,
+    extrasRead2.data?.salads?.length === 2 &&
+      JSON.stringify(extrasRead2.data.salads.map((s) => s.name).sort()) === JSON.stringify(['Laitue', 'Tomate'].sort()),
     JSON.stringify(extrasRead2.data?.salads),
   );
   check(
@@ -783,6 +785,64 @@ async function main() {
   // 19 tacos + 9 Thon (prix produit, sauce gratuite) + 15 frais = 43
   check('prix supplement shop = 9 (sauce gratuite)', extrasOrder.data?.total_price === 43, `got ${extrasOrder.data?.total_price}`);
 
+  // — Quantités ({name, qty}) : MAX_EXTRA_QTY = 3, 400 hors [1,3], rétro-compat. —
+  const qtyOrderBody = (options, label) => ({
+    label,
+    body: {
+      address_id: addressId,
+      payment_method: 'cash',
+      items: [{ product_id: tacosProd.data.id, quantity: 1, options }],
+    },
+  });
+  const qtyOrder = async (label, options, wantStatus, bodyOnly = false) => {
+    const payload = qtyOrderBody(options, label);
+    const r = await expect(label, 'POST', '/orders', { token: clientToken, body: payload.body }, wantStatus);
+    return bodyOnly ? r : r;
+  };
+  const qty2Order = await qtyOrder('POST /orders (Thon qty2)', { 'Suppléments': [{ name: 'Thon', qty: 2 }] }, 201);
+  // 19 tacos + 9×2 Thon + 15 frais = 52
+  check('supplement x2 => total 52', qty2Order.data?.total_price === 52, `got ${qty2Order.data?.total_price}`);
+  check('unit_price x2 = 37', qty2Order.data?.items?.[0]?.unit_price === 37, `got ${qty2Order.data?.items?.[0]?.unit_price}`);
+  const qty3Order = await qtyOrder('POST /orders (Thon qty3)', { 'Suppléments': [{ name: 'Thon', qty: 3 }] }, 201);
+  // 19 tacos + 9×3 Thon + 15 frais = 61
+  check('supplement x3 => total 61', qty3Order.data?.total_price === 61, `got ${qty3Order.data?.total_price}`);
+
+  await qtyOrder('POST /orders (qty4 → 400)', { 'Suppléments': [{ name: 'Thon', qty: 4 }] }, 400);
+  const qty0 = await api('POST', '/orders', { token: clientToken, body: qtyOrderBody({ 'Suppléments': [{ name: 'Thon', qty: 0 }] }, '').body });
+  check('qty0 → 400 INVALID_QUANTITY', qty0.status === 400 && qty0.data?.error?.code === 'INVALID_QUANTITY', JSON.stringify(qty0.data)?.slice(0, 200));
+  const qtyStr = await api('POST', '/orders', { token: clientToken, body: qtyOrderBody({ 'Suppléments': [{ name: 'Thon', qty: '2' }] }, '').body });
+  check('qty "2" (string) → 400', qtyStr.status === 400 && qtyStr.data?.error?.code === 'INVALID_QUANTITY', JSON.stringify(qtyStr.data)?.slice(0, 200));
+  const qtyHalf = await api('POST', '/orders', { token: clientToken, body: qtyOrderBody({ 'Suppléments': [{ name: 'Thon', qty: 2.5 }] }, '').body });
+  check('qty 2.5 → 400', qtyHalf.status === 400, `got ${qtyHalf.status}`);
+  const qtyNeg = await api('POST', '/orders', { token: clientToken, body: qtyOrderBody({ 'Suppléments': [{ name: 'Thon', qty: -1 }] }, '').body });
+  check('qty -1 → 400', qtyNeg.status === 400, `got ${qtyNeg.status}`);
+  const qtyFreeGt = await api('POST', '/orders', { token: clientToken, body: qtyOrderBody({ Sauces: [{ name: 'Harissa', qty: 5 }] }, '').body });
+  check('qty 5 dans groupe gratuit → 400 aussi', qtyFreeGt.status === 400, `got ${qtyFreeGt.status}`);
+
+  // Legacy (array of {name,price} / {group,name,price} / strings) : exactement comme avant.
+  const legacyOrder = await qtyOrder('POST /orders (legacy array)', [{ group: 'Suppléments', name: 'Thon', price: 999 }], 201);
+  check('legacy array => Thon x1 = 43', legacyOrder.data?.total_price === 43, `got ${legacyOrder.data?.total_price}`);
+
+  // Sauces/salades avec qty 2/3 : toujours GRATUITES.
+  const freeQtyOrder = await qtyOrder('POST /orders (sauces/salades qty)', {
+    Sauces: [{ name: 'Harissa', qty: 3 }],
+    Salades: [{ name: 'Laitue', qty: 2 }],
+    'Suppléments': [{ name: 'Thon', qty: 1 }],
+  }, 201);
+  check('sauces/salades qty2/3 gratuites (43)', freeQtyOrder.data?.total_price === 43, `got ${freeQtyOrder.data?.total_price}`);
+
+  // Même nom répété (qty 1 + qty 3) : la MEILLEURE qty compte → x3 (27), pas x4 (36).
+  const dupOrder = await qtyOrder('POST /orders (doublon Thon qty1+qty3)', {
+    'Suppléments': [{ name: 'Thon', qty: 1 }, { name: 'thon', qty: 3 }],
+  }, 201);
+  check('doublon casse-insensible => x3 (61)', dupOrder.data?.total_price === 61, `got ${dupOrder.data?.total_price}`);
+
+  // Nom inconnu : jamais facturé — 19 tacos + 0 + 15 frais = 34.
+  const unknownOrder = await qtyOrder('POST /orders (nom inconnu qty2)', {
+    'Suppléments': [{ name: `Inconnu ${stamp}`, qty: 2 }],
+  }, 201);
+  check('nom inconnu gratuit (34)', unknownOrder.data?.total_price === 34, `got ${unknownOrder.data?.total_price}`);
+
   // Nettoyage : produits jamais commandes supprimés, les produits commandés
   // passent en soft-delete (is_available=false), le commerce avec commandes
   // refuse le delete.
@@ -799,8 +859,13 @@ async function main() {
   check('soft delete : is_available=false', softDeletedTacos.data?.is_available === false, JSON.stringify(softDeletedTacos.data)?.slice(0, 200));
   const softDeletedSandwich = await expect('DELETE Sandwich commandé (soft)', 'DELETE', `/admin/products/${sandwichProd.id}`, { token: admin }, 200);
   check('soft delete Sandwich : is_available=false', softDeletedSandwich.data?.is_available === false, JSON.stringify(softDeletedSandwich.data)?.slice(0, 200));
-  const delExtrasResto = await expect('DELETE restaurant extras (avec commande) → 409', 'DELETE', `/admin/restaurants/${extrasResto.data.id}`, { token: admin }, 409);
-  check('code HAS_ORDERS (extras)', delExtrasResto.data?.error?.code === 'HAS_ORDERS', JSON.stringify(delExtrasResto.data));
+  // Contrat actuel (API.md) : commerce AVEC commandes → 204 cascade (commandes
+  // → OrderItem/avis, produits). L'ancien 409 HAS_ORDERS ne concerne plus
+  // que les livreurs.
+  const delExtrasResto = await expect('DELETE restaurant extras (avec commandes, cascade)', 'DELETE', `/admin/restaurants/${extrasResto.data.id}`, { token: admin }, 204);
+  check('cascade : commerce introuvable après 204', delExtrasResto.status === 204, `got ${delExtrasResto.status}`);
+  const goneResto = await api('GET', `/products/${tacosProd.data.id}`, {});
+  check('cascade : produit Tacos supprimé avec le commerce', goneResto.status === 404, `got ${goneResto.status}`);
 
 
   console.log('— Notifications —');

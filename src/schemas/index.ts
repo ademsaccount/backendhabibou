@@ -421,7 +421,10 @@ export const extrasCatalogTypeParam = z.object({
 
 export const extrasCatalogItemParams = z.object({
   type: z.enum(['sauces', 'salads', 'supplements']),
-  id: idParam,
+  // ATTENTION : idParam est une ENVELOPPE ({ id: string }) — l'imbriquer
+  // comme `id: idParam` exigerait params.id = { id } (objet), alors que
+  // Express fournit toujours une chaîne. On aplatit sa forme ici.
+  ...idParam.shape,
 });
 
 export const findOrCreateExtrasCatalogItemSchema = z.object({
