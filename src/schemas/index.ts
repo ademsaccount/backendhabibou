@@ -370,27 +370,79 @@ export const createSupplementSchema = z.object({
   }),
 });
 
-/* ------------- Garnitures au niveau commerce (sauces / supplements) ------------- */
+/* ------------- Garnitures au niveau commerce (salades / sauces / supplements) ------------- */
+
+/**
+ * Un item de garniture shop référence la ligne du CATALOGUE GLOBAL :
+ * soit `id` (catalog_id), soit `name` (find-or-create par nom normalisé —
+ * l'import de menu ne connaît que des noms).
+ */
+export const restaurantExtraItemInput = z
+  .object({
+    id: z.string().uuid().optional(),
+    name: z.string().trim().min(1).optional(),
+  })
+  .refine((row) => Boolean(row.id || row.name), { message: 'id ou name requis' });
 
 /** Supplement du shop : prix 0.5 par defaut, plafonne a 100 DT. */
-export const restaurantSupplementInput = z.object({
-  name: z.string().trim().min(1),
-  extra_price: z.coerce.number().min(0).max(100).optional(),
-  for_fricasse: z.boolean().optional(),
-});
+export const restaurantSupplementInput = restaurantExtraItemInput
+  .extend({
+    extra_price: z.coerce.number().min(0).max(100).optional(),
+    for_fricasse: z.boolean().optional(),
+  });
 
 /** Sauce du shop (gratuite, jamais tarifée). */
-export const restaurantSauceInput = z.object({
-  name: z.string().trim().min(1),
-});
+export const restaurantSauceInput = restaurantExtraItemInput;
 
-/** Payload REPLACE-ALL des garnitures d'un commerce. */
+/** Salade du shop (garniture fraîche : gratuite, jamais tarifée). */
+export const restaurantSaladInput = restaurantExtraItemInput;
+
+/**
+ * Payload des garnitures d'un commerce : chaque liste est OPTIONNELLE.
+ * Présente = REPLACE-ALL de cette liste (dédupe après résolution du
+ * catalogue par id) ;
+ * absente = la liste existante est laissée STRICTEMENT intouchée (un client
+ * qui ne connaît pas les salades ne peut jamais les effacer par accident).
+ */
 export const updateRestaurantExtrasSchema = z.object({
   params: idParam,
   body: z.object({
-    supplements: z.array(restaurantSupplementInput).max(200),
-    sauces: z.array(restaurantSauceInput).max(200),
+    supplements: z.array(restaurantSupplementInput).max(200).optional(),
+    sauces: z.array(restaurantSauceInput).max(200).optional(),
+    salads: z.array(restaurantSaladInput).max(200).optional(),
   }),
+});
+
+/* ------------- Catalogue global des garnitures (sauces / salades / supplements) ------------- */
+
+export const extrasCatalogTypeParam = z.object({
+  type: z.enum(['sauces', 'salads', 'supplements']),
+});
+
+export const extrasCatalogItemParams = z.object({
+  type: z.enum(['sauces', 'salads', 'supplements']),
+  id: idParam,
+});
+
+export const findOrCreateExtrasCatalogItemSchema = z.object({
+  params: extrasCatalogTypeParam,
+  body: z.object({
+    name: z.string().trim().min(1, 'Nom requis').max(120),
+    // Image optionnelle : renseignée seulement si la ligne n'a pas encore d'image.
+    image_url: z.string().min(1).nullable().optional(),
+  }),
+});
+
+export const updateExtrasCatalogItemSchema = z.object({
+  params: extrasCatalogItemParams,
+  body: z
+    .object({
+      name: z.string().trim().min(1, 'Nom requis').max(120).optional(),
+      image_url: z.string().min(1).nullable().optional(),
+    })
+    .refine((body) => body.name !== undefined || body.image_url !== undefined, {
+      message: 'name ou image_url requis',
+    }),
 });
 
 /* ------------- Catégories de médicaments (flux Pharmacie, admin) ------------- */

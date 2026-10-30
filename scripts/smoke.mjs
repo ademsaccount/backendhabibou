@@ -448,7 +448,131 @@ async function main() {
   const flavorNull = await expect('GET flavor effacee', 'GET', `/products/${flavorProd.data.id}`, {}, 200);
   check('flavor = null', flavorNull.data?.flavor === null, JSON.stringify(flavorNull.data?.flavor));
 
-  // PUT extras : replace-all + dedupe casse-insensible + prix par defaut 0.5.
+  // — Catalogue global des garnitures : GET, POST find-or-create (casse ET
+  // accents resolvent vers UNE ligne), PUT image, collision de renommage 409.
+  console.log('— Admin : catalogue global garnitures (sauces/salades/supplements) —');
+  const cat0 = await expect('GET /admin/extras-catalog', 'GET', '/admin/extras-catalog', { token: admin }, 200);
+  check('catalogue : 3 listes', Array.isArray(cat0.data?.sauces) && Array.isArray(cat0.data?.salads) && Array.isArray(cat0.data?.supplements), JSON.stringify(cat0.data)?.slice(0, 200));
+  check(
+    'catalogue supplements : default_extra_price present',
+    cat0.data?.supplements?.every((s) => typeof s.default_extra_price === 'number'),
+    JSON.stringify(cat0.data?.supplements?.[0]),
+  );
+
+  const catSauceA = await expect('POST catalog sauce (accent)', 'POST', '/admin/extras-catalog/sauces', {
+    token: admin,
+    body: { name: `Saucisse Éricka ${stamp}` },
+  }, 201);
+  const catSauceB = await expect('POST catalog sauce (casse+accent variante)', 'POST', '/admin/extras-catalog/sauces', {
+    token: admin,
+    body: { name: `saucisse ericka ${stamp}` },
+  }, 200);
+  check(
+    'find-or-create meme ligne (casse/accents ignore)',
+    catSauceA.data?.id === catSauceB.data?.id,
+    `${catSauceA.data?.id} vs ${catSauceB.data?.id}`,
+  );
+  const catSauceC = await expect('POST catalog sauce avec image', 'POST', '/admin/extras-catalog/sauces', {
+    token: admin,
+    body: { name: `SAUCISSE ERICKA ${stamp}`, image_url: `https://cdn.extras.test/saucisse-${stamp}.png` },
+  }, 200);
+  check(
+    'image posee sur ligne existante sans image',
+    catSauceC.data?.id === catSauceA.data?.id &&
+      catSauceC.data?.image_url === `https://cdn.extras.test/saucisse-${stamp}.png`,
+    JSON.stringify(catSauceC.data),
+  );
+
+  const catSaladA = await expect('POST catalog salade', 'POST', '/admin/extras-catalog/salads', {
+    token: admin,
+    body: { name: `Persille ${stamp}` },
+  }, 201);
+  const catSaladB = await expect('POST catalog salade (doublon casse)', 'POST', '/admin/extras-catalog/salads', {
+    token: admin,
+    body: { name: `persille ${stamp}` },
+  }, 200);
+  check('salade : une seule ligne', catSaladA.data?.id === catSaladB.data?.id, JSON.stringify(catSaladB.data));
+
+  const catSuppA = await expect('POST catalog supplement', 'POST', '/admin/extras-catalog/supplements', {
+    token: admin,
+    body: { name: `Perche ${stamp}` },
+  }, 201);
+  const catSuppB = await expect('POST catalog supplement (doublon casse)', 'POST', '/admin/extras-catalog/supplements', {
+    token: admin,
+    body: { name: `PERCHE ${stamp}` },
+  }, 200);
+  check('supplement : une seule ligne', catSuppA.data?.id === catSuppB.data?.id, JSON.stringify(catSuppB.data));
+  check('supplement : in_catalog une ligne', cat0.data?.supplements?.filter((s) => s.name === `Perche ${stamp}`).length === 0, 'avant POST');
+
+  const catImagePut = await expect('PUT image catalog sauce', 'PUT', `/admin/extras-catalog/sauces/${catSauceA.data.id}`, {
+    token: admin,
+    body: { image_url: `https://cdn.extras.test/saucisse-${stamp}-v2.png` },
+  }, 200);
+  check(
+    'PUT image remplace l image',
+    catImagePut.data?.image_url === `https://cdn.extras.test/saucisse-${stamp}-v2.png`,
+    JSON.stringify(catImagePut.data),
+  );
+
+  const catRenameRow = await expect('POST catalog sauce (renommage)', 'POST', '/admin/extras-catalog/sauces', {
+    token: admin,
+    body: { name: `Tagada ${stamp}` },
+  }, 201);
+  await expect('PUT renommage en collision → 409', 'PUT', `/admin/extras-catalog/sauces/${catRenameRow.data.id}`, {
+    token: admin,
+    body: { name: `saucisse ericka ${stamp}` },
+  }, 409);
+
+  // Contrats : by-id ET by-name. Dedupe par id de catalogue.
+  await expect('PUT extras (replace-all par id + nom)', 'PUT', `/admin/restaurants/${extrasResto.data.id}/extras`, {
+    token: admin,
+    body: {
+      sauces: [
+        { id: catSauceA.data.id }, // by-id
+        { name: `Durra ${stamp}` }, // by-name (cree dans le catalogue sans image)
+        { name: `SAUCISSE ERICKA ${stamp}` }, // meme id que catSauceA -> dedupe
+      ],
+    },
+  }, 200);
+  const extrasRead0 = await expect('GET extras (catalogue)', 'GET', `/admin/restaurants/${extrasResto.data.id}/extras`, { token: admin }, 200);
+  check(
+    'extras sauces : 2 lignes dedupees par id catalogue',
+    extrasRead0.data?.sauces?.length === 2 &&
+      extrasRead0.data?.sauces?.some((s) => s.id === catSauceA.data.id),
+    JSON.stringify(extrasRead0.data?.sauces),
+  );
+  check(
+    'extras sauces : image_url du catalogue renseignee',
+    extrasRead0.data?.sauces?.find((s) => s.id === catSauceA.data.id)?.image_url === `https://cdn.extras.test/saucisse-${stamp}-v2.png`,
+    JSON.stringify(extrasRead0.data?.sauces),
+  );
+
+  // Deux commerces partagent UNE seule ligne de catalogue.
+  const sharingResto = await expect('POST /admin/restaurants (partage catalogue)', 'POST', '/admin/restaurants', {
+    token: admin,
+    body: {
+      name: `Smoke Sharing ${stamp}`,
+      category: 'snack',
+      address: '4 Rue Garnitures',
+      latitude: 36.8066,
+      longitude: 10.1816,
+      is_open: true,
+      opening_hours: { open: '09:00', close: '22:30' },
+    },
+  }, 201);
+  await expect('PUT extras sharing resto (par nom)', 'PUT', `/admin/restaurants/${sharingResto.data.id}/extras`, {
+    token: admin,
+    body: { sauces: [{ name: `saucisse ericka ${stamp}` }] },
+  }, 200);
+  const sharingExtras = await expect('GET extras sharing resto', 'GET', `/admin/restaurants/${sharingResto.data.id}/extras`, { token: admin }, 200);
+  check(
+    'un seul id catalogue partagé entre 2 commerces',
+    sharingExtras.data?.sauces?.length === 1 && sharingExtras.data?.sauces?.[0]?.id === catSauceA.data.id,
+    JSON.stringify(sharingExtras.data?.sauces),
+  );
+  await expect('DELETE sharing resto', 'DELETE', `/admin/restaurants/${sharingResto.data.id}`, { token: admin }, 204);
+
+  // PUT extras : replace-all + dedupe par id catalogue + prix par defaut 0.5.
   await expect('PUT extras (replace-all)', 'PUT', `/admin/restaurants/${extrasResto.data.id}/extras`, {
     token: admin,
     body: {
@@ -462,11 +586,22 @@ async function main() {
         { name: 'Mayonnaise' },
         { name: 'harissa' }, // doublon -> ignore
       ],
+      salads: [
+        { name: 'Laitue' },
+        { name: 'Tomate' },
+        { name: 'laitue' }, // doublon -> ignore
+      ],
     },
   }, 200);
   const extrasRead = await expect('GET extras', 'GET', `/admin/restaurants/${extrasResto.data.id}/extras`, { token: admin }, 200);
   check('2 supplements (dedupe)', extrasRead.data?.supplements?.length === 2, JSON.stringify(extrasRead.data?.supplements));
   check('2 sauces (dedupe)', extrasRead.data?.sauces?.length === 2, JSON.stringify(extrasRead.data?.sauces));
+  check('2 salades (dedupe)', extrasRead.data?.salads?.length === 2, JSON.stringify(extrasRead.data?.salads));
+  check(
+    'salades Laitue + Tomate',
+    extrasRead.data?.salads?.every((s) => ['Laitue', 'Tomate'].includes(s.name)),
+    JSON.stringify(extrasRead.data?.salads),
+  );
   const thonRow = extrasRead.data?.supplements?.find((s) => s.name === 'Thon');
   check('Thon prix = 2.5', thonRow?.extra_price === 2.5 && thonRow?.for_fricasse === false, JSON.stringify(thonRow));
   const kwikaRow = extrasRead.data?.supplements?.find((s) => s.name === 'Kwika');
@@ -525,6 +660,109 @@ async function main() {
   const pizzaDetailSmoke = await expect('GET Pizza detail', 'GET', `/products/${pizzaProd.data.id}`, {}, 200);
   check('Pizza : aucune sauce', JSON.stringify(pizzaDetailSmoke.data?.sauces) === '[]', JSON.stringify(pizzaDetailSmoke.data?.sauces));
   check('Pizza : aucun supplement shop', JSON.stringify(pizzaDetailSmoke.data?.supplements) === '[]', JSON.stringify(pizzaDetailSmoke.data?.supplements));
+  check('Pizza : aucune salade', JSON.stringify(pizzaDetailSmoke.data?.salads) === '[]', JSON.stringify(pizzaDetailSmoke.data?.salads));
+
+  // — Regles SALADES : uniquement Sandwich, Burger, Makloub, Libanais, Baguette farcie.
+  const SaladDISH_TYPES = [
+    ['Sandwich', true],
+    ['Burger', true],
+    ['Makloub', true],
+    ['Libanais', true],
+    ['Baguette farcie', true],
+    ['Tacos', false],
+    ['Cornet', false],
+  ];
+  const createdExtrasProds = [];
+  for (const [dishType, wantsSalads] of SaladDISH_TYPES) {
+    const prod = await expect(`POST produit ${dishType} (regle salades)`, 'POST', `/admin/restaurants/${extrasResto.data.id}/products`, {
+      token: admin,
+      body: { name: `${dishType} Smoke`, price: 10, dish_type: dishType },
+    }, 201);
+    createdExtrasProds.push(prod.data);
+    const detail = await expect(`GET ${dishType} detail`, 'GET', `/products/${prod.data.id}`, {}, 200);
+    if (wantsSalads) {
+      check(
+        `${dishType} : recoit salades (gratuites)`,
+        JSON.stringify(detail.data?.salads) === JSON.stringify(['Laitue', 'Tomate']),
+        JSON.stringify(detail.data?.salads),
+      );
+    } else {
+      check(
+        `${dishType} : AUCUNE salade`,
+        JSON.stringify(detail.data?.salads) === '[]',
+        JSON.stringify(detail.data?.salads),
+      );
+    }
+  }
+  const flavorProdDetail = await expect('GET Makloub (flavor) salades', 'GET', `/products/${flavorProd.data.id}`, {}, 200);
+  check(
+    'Makloub : salades presentes despite flavor',
+    JSON.stringify(flavorProdDetail.data?.salads) === JSON.stringify(['Laitue', 'Tomate']),
+    JSON.stringify(flavorProdDetail.data?.salads),
+  );
+  check('Fricassé : aucune salade', JSON.stringify(fricasseeDetail.data?.salads) === '[]', JSON.stringify(fricasseeDetail.data?.salads));
+  check('Tacos : aucune salade', JSON.stringify(tacosDetail.data?.salads) === '[]', JSON.stringify(tacosDetail.data?.salads));
+
+  // PUT extras SANS salades (ni sauces) : les salades/sauces restent intouchées.
+  await expect('PUT extras sans salades (absent = intouché)', 'PUT', `/admin/restaurants/${extrasResto.data.id}/extras`, {
+    token: admin,
+    body: {
+      supplements: [
+        { name: 'Thon', extra_price: 2.5 },
+        { name: 'Kwika', for_fricasse: true },
+      ],
+    },
+  }, 200);
+  const extrasRead2 = await expect('GET extras après PUT partiel', 'GET', `/admin/restaurants/${extrasResto.data.id}/extras`, { token: admin }, 200);
+  check(
+    'salades inchangées après PUT sans liste salades',
+    JSON.stringify(extrasRead2.data?.salads) === JSON.stringify(['Laitue', 'Tomate']) && extrasRead2.data?.salads?.length === 2,
+    JSON.stringify(extrasRead2.data?.salads),
+  );
+  check(
+    'sauces inchangées après PUT sans liste sauces',
+    extrasRead2.data?.sauces?.length === 2,
+    JSON.stringify(extrasRead2.data?.sauces),
+  );
+
+  const sandwichProd = createdExtrasProds.find((p) => p.dish_type === 'Sandwich');
+
+  // Items enrichis : sauce_items / salad_items = {id, name, image_url}.
+  const sandwichDetailItems = await expect('GET Sandwich detail (items)', 'GET', `/products/${sandwichProd.id}`, {}, 200);
+  check(
+    'Sandwich : salad_items avec image (nulle ou string)',
+    Array.isArray(sandwichDetailItems.data?.salad_items) &&
+      sandwichDetailItems.data.salad_items.length === 2 &&
+      sandwichDetailItems.data.salad_items.every((s) => typeof s.id === 'string' && typeof s.name === 'string' && (s.image_url === null || typeof s.image_url === 'string')),
+    JSON.stringify(sandwichDetailItems.data?.salad_items),
+  );
+  check(
+    'Sandwich : sauce_items meme longueur que sauces',
+    Array.isArray(sandwichDetailItems.data?.sauce_items) && sandwichDetailItems.data?.sauce_items?.length === sandwichDetailItems.data?.sauces?.length,
+    JSON.stringify(sandwichDetailItems.data?.sauce_items),
+  );
+
+  // Pricing : une commande avec salade = même total que sans (les salades sont
+  // GRATUITES, jamais facturées même en collision potentielle de nom).
+  const orderBody = (withSalads) => ({
+    address_id: addressId,
+    payment_method: 'cash',
+    items: [
+      {
+        product_id: sandwichProd.id,
+        quantity: 1,
+        options: withSalads
+          ? { Sauces: ['Harissa'], Salades: ['Laitue', 'Tomate'] }
+          : { Sauces: ['Harissa'] },
+      },
+    ],
+  });
+  const orderWith = await expect('POST /orders (avec salades)', 'POST', '/orders', { token: clientToken, body: orderBody(true) }, 201);
+  const orderWithout = await expect('POST /orders (sans salades)', 'POST', '/orders', { token: clientToken, body: orderBody(false) }, 201);
+  // Sandwich 10 + 15 frais = 25 dans les deux cas (les salades ne sont jamais tarifées).
+  check('commande avec salades = 25 (gratuites)', orderWith.data?.total_price === 25, `got ${orderWith.data?.total_price}`);
+  check('commande sans salades = 25 aussi', orderWithout.data?.total_price === 25, `got ${orderWithout.data?.total_price}`);
+  check('total identique avec/sans salades', orderWith.data?.total_price === orderWithout.data?.total_price, `${orderWith.data?.total_price} vs ${orderWithout.data?.total_price}`);
 
   // Pricing commande : supplement shop tarifé côté serveur, sauce gratuite.
   const extrasOrder = await expect('POST /orders (supplement shop)', 'POST', '/orders', {
@@ -532,7 +770,7 @@ async function main() {
     body: {
       address_id: addressId,
       payment_method: 'cash',
-      // Structure proposee : { "Sauces": [...], "Suppléments": [...] }
+      // Structure proposee : { "Sauces": [...], "Salades": [...], "Suppléments": [...] }
       items: [
         {
           product_id: tacosProd.data.id,
@@ -545,13 +783,22 @@ async function main() {
   // 19 tacos + 9 Thon (prix produit, sauce gratuite) + 15 frais = 43
   check('prix supplement shop = 9 (sauce gratuite)', extrasOrder.data?.total_price === 43, `got ${extrasOrder.data?.total_price}`);
 
-  // Nettoyage : produits jamais commandes supprimés, le Tacos commandé passe en
-  // soft-delete (is_available=false), le commerce avec commande refuse le delete.
+  // Nettoyage : produits jamais commandes supprimés, les produits commandés
+  // passent en soft-delete (is_available=false), le commerce avec commandes
+  // refuse le delete.
   await expect('DELETE Fricassé', 'DELETE', `/admin/products/${fricasseeProd.data.id}`, { token: admin }, 204);
   await expect('DELETE Pizza', 'DELETE', `/admin/products/${pizzaProd.data.id}`, { token: admin }, 204);
   await expect('DELETE Makloub', 'DELETE', `/admin/products/${flavorProd.data.id}`, { token: admin }, 204);
+  for (const dishType of ['Burger', 'Makloub', 'Libanais', 'Baguette farcie', 'Tacos', 'Cornet']) {
+    const prod = createdExtrasProds.find((p) => p.dish_type === dishType);
+    if (prod) {
+      await expect(`DELETE ${dishType} (non commandé)`, 'DELETE', `/admin/products/${prod.id}`, { token: admin }, 204);
+    }
+  }
   const softDeletedTacos = await expect('DELETE Tacos commandé (soft)', 'DELETE', `/admin/products/${tacosProd.data.id}`, { token: admin }, 200);
   check('soft delete : is_available=false', softDeletedTacos.data?.is_available === false, JSON.stringify(softDeletedTacos.data)?.slice(0, 200));
+  const softDeletedSandwich = await expect('DELETE Sandwich commandé (soft)', 'DELETE', `/admin/products/${sandwichProd.id}`, { token: admin }, 200);
+  check('soft delete Sandwich : is_available=false', softDeletedSandwich.data?.is_available === false, JSON.stringify(softDeletedSandwich.data)?.slice(0, 200));
   const delExtrasResto = await expect('DELETE restaurant extras (avec commande) → 409', 'DELETE', `/admin/restaurants/${extrasResto.data.id}`, { token: admin }, 409);
   check('code HAS_ORDERS (extras)', delExtrasResto.data?.error?.code === 'HAS_ORDERS', JSON.stringify(delExtrasResto.data));
 

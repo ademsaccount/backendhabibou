@@ -12,6 +12,7 @@ import {
   createRestaurantSchema,
   createStorySchema,
   createSupplementSchema,
+  findOrCreateExtrasCatalogItemSchema,
   idParam,
   orderMessageSchema,
   adminOrderStatusSchema,
@@ -21,18 +22,23 @@ import {
   updateMedicationCategorySchema,
   updateProductSchema,
   updateRestaurantExtrasSchema,
+  updateExtrasCatalogItemSchema,
   updateRestaurantSchema,
   updateStorySchema,
 } from '../schemas';
 import {
   productCatalogInclude,
   loadShopExtras,
+  resolveCatalogSalad,
+  resolveCatalogSauce,
+  resolveCatalogSupplement,
   syncProductIngredients,
   syncProductSupplements,
   withCatalogs,
   type IngredientInput,
   type SupplementInput,
 } from '../lib/catalog';
+import { normalizeItemName } from '../lib/categoryRules';
 // --- DÉSACTIVÉ : gestion de plusieurs livreurs (l'admin fait office de livreur unique) ---
 // import { assignLivreur, changeOrderStatus } from '../services/order.service';
 import { changeOrderStatus, pickUpOrderShop } from '../services/order.service';
@@ -221,20 +227,32 @@ adminRouter.delete(
   }),
 );
 
-/* ---------------- Garnitures du commerce (supplements + sauces shop) ---------------- */
+/* ---------------- Garnitures du commerce (salades + sauces + supplements shop) ---------------- *
+ *  Les sauces / salades / supplements vivent dans un CATALOGUE GLOBAL
+ *  (Sauce / Salad / Supplement avec image) ; ces tables ne portent que les
+ *  LIENS du commerce + les particularités (extra_price, for_fricasse). */
 
-type ExtrasSupplementRow = { id: string; name: string; extra_price: number; for_fricasse: boolean };
-type ExtrasSauceRow = { id: string; name: string };
+type ExtrasSupplementRow = {
+  supplement: { id: string; name: string; image_url: string | null };
+  extra_price: number;
+  for_fricasse: boolean;
+};
+type ExtrasSauceRow = { sauce: { id: string; name: string; image_url: string | null } };
+type ExtrasSaladRow = { salad: { id: string; name: string; image_url: string | null } };
 
-function extrasDto(supplements: ExtrasSupplementRow[], sauces: ExtrasSauceRow[]) {
+function extrasDto(supplements: ExtrasSupplementRow[], sauces: ExtrasSauceRow[], salads: ExtrasSaladRow[]) {
   return {
     supplements: supplements.map((s) => ({
-      id: s.id,
-      name: s.name,
+      // id = id du Supplement du CATALOGUE global (même convention que les
+      // suppléments produit) → PUT extras accepte id OU name.
+      id: s.supplement.id,
+      name: s.supplement.name,
+      image_url: s.supplement.image_url,
       extra_price: s.extra_price,
       for_fricasse: s.for_fricasse,
     })),
-    sauces: sauces.map((s) => ({ id: s.id, name: s.name })),
+    sauces: sauces.map((s) => ({ id: s.sauce.id, name: s.sauce.name, image_url: s.sauce.image_url })),
+    salads: salads.map((s) => ({ id: s.salad.id, name: s.salad.name, image_url: s.salad.image_url })),
   };
 }
 
@@ -242,13 +260,20 @@ function fetchExtras(restaurantId: string) {
   return Promise.all([
     prisma.restaurantSupplement.findMany({
       where: { restaurant_id: restaurantId },
-      orderBy: [{ sort_order: 'asc' }, { name: 'asc' }],
+      include: { supplement: { select: { id: true, name: true, image_url: true } } },
+      orderBy: [{ sort_order: 'asc' }, { supplement: { name: 'asc' } }],
     }),
     prisma.restaurantSauce.findMany({
       where: { restaurant_id: restaurantId },
-      orderBy: [{ sort_order: 'asc' }, { name: 'asc' }],
+      include: { sauce: { select: { id: true, name: true, image_url: true } } },
+      orderBy: [{ sort_order: 'asc' }, { sauce: { name: 'asc' } }],
     }),
-  ]);
+    prisma.restaurantSalad.findMany({
+      where: { restaurant_id: restaurantId },
+      include: { salad: { select: { id: true, name: true, image_url: true } } },
+      orderBy: [{ sort_order: 'asc' }, { salad: { name: 'asc' } }],
+    }),
+  ] as const);
 }
 
 adminRouter.get(
@@ -257,8 +282,8 @@ adminRouter.get(
   asyncHandler(async (req, res) => {
     const restaurant = await prisma.restaurant.findUnique({ where: { id: req.params.id } });
     if (!restaurant) throw ApiError.notFound('Commerce introuvable');
-    const [supplements, sauces] = await fetchExtras(restaurant.id);
-    res.json(extrasDto(supplements, sauces));
+    const [supplements, sauces, salads] = await fetchExtras(restaurant.id);
+    res.json(extrasDto(supplements, sauces, salads));
   }),
 );
 
@@ -267,55 +292,252 @@ adminRouter.put(
   validate(updateRestaurantExtrasSchema),
   asyncHandler(async (req, res) => {
     const body = req.validated?.body as {
-      supplements: { name: string; extra_price?: number; for_fricasse?: boolean }[];
-      sauces: { name: string }[];
+      supplements?: { id?: string; name?: string; extra_price?: number; for_fricasse?: boolean }[];
+      sauces?: { id?: string; name?: string }[];
+      salads?: { id?: string; name?: string }[];
     };
     const restaurant = await prisma.restaurant.findUnique({ where: { id: req.params.id } });
     if (!restaurant) throw ApiError.notFound('Commerce introuvable');
 
-    // REPLACE-ALL : la liste envoyee remplace l'existante (dedupe casse-insensible).
-    const seenSupplements = new Set<string>();
-    const supplementRows = body.supplements
-      .map((row) => ({ ...row, name: row.name.trim() }))
-      .filter((row) => {
-        const key = row.name.toLowerCase();
-        if (seenSupplements.has(key)) return false;
-        seenSupplements.add(key);
-        return true;
-      })
-      .map((row, index) => ({
-        restaurant_id: restaurant.id,
-        name: row.name,
-        extra_price: row.extra_price ?? 0.5,
-        for_fricasse: row.for_fricasse ?? false,
-        sort_order: index,
-      }));
+    // Chaque liste PRESENTE = REPLACE-ALL (résolution find-or-create dans le
+    // catalogue global, puis dedupe par id de catalogue) ;
+    // chaque liste ABSENTE = strictement intouchée (un client qui ignore
+    // encore les salades ne peut jamais les effacer par accident).
+    type SupplementLink = { restaurant_id: string; supplement_id: string; extra_price: number; for_fricasse: boolean; sort_order: number };
+    const supplementRows = body.supplements === undefined ? null : body.supplements;
+    const sauceRows = body.sauces === undefined ? null : body.sauces;
+    const saladRows = body.salads === undefined ? null : body.salads;
 
-    const seenSauces = new Set<string>();
-    const sauceRows = body.sauces
-      .map((row) => ({ name: row.name.trim() }))
-      .filter((row) => {
-        if (!row.name) return false;
-        const key = row.name.toLowerCase();
-        if (seenSauces.has(key)) return false;
-        seenSauces.add(key);
-        return true;
-      })
-      .map((row, index) => ({ restaurant_id: restaurant.id, name: row.name, sort_order: index }));
+    let supplementLinks: SupplementLink[] | null = null;
+    let sauceLinks: { restaurant_id: string; sauce_id: string; sort_order: number }[] | null = null;
+    let saladLinks: { restaurant_id: string; salad_id: string; sort_order: number }[] | null = null;
 
     const lists = await prisma.$transaction(async (tx) => {
-      await tx.restaurantSupplement.deleteMany({ where: { restaurant_id: restaurant.id } });
-      await tx.restaurantSauce.deleteMany({ where: { restaurant_id: restaurant.id } });
-      if (supplementRows.length > 0) {
-        await tx.restaurantSupplement.createMany({ data: supplementRows });
+      if (supplementRows !== null) {
+        // Première occurrence d'un id de catalogue gagne sur prix/toggle.
+        const resolved: { id: string; extra_price?: number; for_fricasse?: boolean }[] = [];
+        const seen = new Set<string>();
+        for (const row of supplementRows) {
+          const id = await resolveCatalogSupplement(tx, row);
+          if (!id || seen.has(id)) continue;
+          seen.add(id);
+          resolved.push({ id, extra_price: row.extra_price, for_fricasse: row.for_fricasse });
+        }
+        supplementLinks = resolved.map((row, index) => ({
+          restaurant_id: restaurant.id,
+          supplement_id: row.id,
+          extra_price: row.extra_price ?? 0.5,
+          for_fricasse: row.for_fricasse ?? false,
+          sort_order: index,
+        }));
+        await tx.restaurantSupplement.deleteMany({ where: { restaurant_id: restaurant.id } });
+        if (supplementLinks.length > 0) {
+          await tx.restaurantSupplement.createMany({ data: supplementLinks as SupplementLink[] });
+        }
       }
-      if (sauceRows.length > 0) {
-        await tx.restaurantSauce.createMany({ data: sauceRows });
+      if (sauceRows !== null) {
+        const resolvedIds: string[] = [];
+        const seenSauces = new Set<string>();
+        for (const row of sauceRows) {
+          const id = await resolveCatalogSauce(tx, row);
+          if (!id || seenSauces.has(id)) continue;
+          seenSauces.add(id);
+          resolvedIds.push(id);
+        }
+        sauceLinks = resolvedIds.map((sauce_id, index) => ({ restaurant_id: restaurant.id, sauce_id, sort_order: index }));
+        await tx.restaurantSauce.deleteMany({ where: { restaurant_id: restaurant.id } });
+        if (sauceLinks.length > 0) {
+          await tx.restaurantSauce.createMany({ data: sauceLinks as Exclude<typeof sauceLinks, null> });
+        }
       }
-      // Relecture ordonnée côté DB (sort_order, name).
+      if (saladRows !== null) {
+        const resolvedIds: string[] = [];
+        const seenSalads = new Set<string>();
+        for (const row of saladRows) {
+          const id = await resolveCatalogSalad(tx, row);
+          if (!id || seenSalads.has(id)) continue;
+          seenSalads.add(id);
+          resolvedIds.push(id);
+        }
+        saladLinks = resolvedIds.map((salad_id, index) => ({ restaurant_id: restaurant.id, salad_id, sort_order: index }));
+        await tx.restaurantSalad.deleteMany({ where: { restaurant_id: restaurant.id } });
+        if (saladLinks.length > 0) {
+          await tx.restaurantSalad.createMany({ data: saladLinks as Exclude<typeof saladLinks, null> });
+        }
+      }
+      // Relecture ordonnée côté DB (sort_order, nom de catalogue).
       return fetchExtras(restaurant.id);
     }, TX_OPTS);
-    res.json(extrasDto(lists[0], lists[1]));
+    res.json(extrasDto(lists[0], lists[1], lists[2]));
+  }),
+);
+
+/* ------------- Catalogue global des garnitures (sauces / salades / supplements) ------------- *
+ *  Une ligne par nom normalisé (sans accents, casse ignorée) ; l'image est
+ *  optionnelle et alimentée par POST /uploads (dossier "extras"). */
+
+adminRouter.get(
+  '/extras-catalog',
+  asyncHandler(async (_req, res) => {
+    const [sauces, salads, supplements] = await Promise.all([
+      prisma.sauce.findMany({ orderBy: { name: 'asc' } }),
+      prisma.salad.findMany({ orderBy: { name: 'asc' } }),
+      // Seuls les suppléments du catalogue (les lignes "locales" d'un seul
+      // produit n'ont pas leur place dans le sélecteur de garnitures shop).
+      prisma.supplement.findMany({
+        where: { in_catalog: true },
+        orderBy: { name: 'asc' },
+      }),
+    ]);
+    res.json({
+      sauces: sauces.map((row) => ({ id: row.id, name: row.name, image_url: row.image_url })),
+      salads: salads.map((row) => ({ id: row.id, name: row.name, image_url: row.image_url })),
+      supplements: supplements.map((row) => ({
+        id: row.id,
+        name: row.name,
+        image_url: row.image_url,
+        default_extra_price: row.default_extra_price,
+      })),
+    });
+  }),
+);
+
+adminRouter.post(
+  '/extras-catalog/:type',
+  validate(findOrCreateExtrasCatalogItemSchema),
+  asyncHandler(async (req, res) => {
+    const type = req.params.type as 'sauces' | 'salads' | 'supplements';
+    const body = req.validated?.body as { name: string; image_url?: string | null };
+    const name = body.name.trim();
+    const imageUrl = body.image_url?.trim() || null;
+
+    if (type === 'sauces') {
+      const key = normalizeItemName(name);
+      const existing = await prisma.sauce.findUnique({ where: { name_key: key } });
+      if (existing) {
+        // Jamais de doublon ; l'image n'est posée que si la ligne en est dépourvue.
+        const updated = imageUrl && !existing.image_url
+          ? await prisma.sauce.update({ where: { id: existing.id }, data: { image_url: imageUrl } })
+          : existing;
+        return res.json({ id: updated.id, name: updated.name, image_url: updated.image_url });
+      }
+      const created = await prisma.sauce.create({ data: { name, name_key: key, image_url: imageUrl } });
+      return res.status(201).json({ id: created.id, name: created.name, image_url: created.image_url });
+    }
+
+    if (type === 'salads') {
+      const key = normalizeItemName(name);
+      const existing = await prisma.salad.findUnique({ where: { name_key: key } });
+      if (existing) {
+        const updated = imageUrl && !existing.image_url
+          ? await prisma.salad.update({ where: { id: existing.id }, data: { image_url: imageUrl } })
+          : existing;
+        return res.json({ id: updated.id, name: updated.name, image_url: updated.image_url });
+      }
+      const created = await prisma.salad.create({ data: { name, name_key: key, image_url: imageUrl } });
+      return res.status(201).json({ id: created.id, name: created.name, image_url: created.image_url });
+    }
+
+    // Suppléments : pas de colonne name_key — catalogue petit, comparaison des
+    // noms normalisés façon resolveCatalogSupplement.
+    const key = normalizeItemName(name);
+    const all = await prisma.supplement.findMany({ orderBy: { created_at: 'asc' } });
+    const existing = all.find((item) => normalizeItemName(item.name) === key);
+    if (existing) {
+      const updated = await prisma.supplement.update({
+        where: { id: existing.id },
+        data: {
+          in_catalog: true,
+          ...(imageUrl && !existing.image_url ? { image_url: imageUrl } : {}),
+        },
+      });
+      return res.json({
+        id: updated.id,
+        name: updated.name,
+        image_url: updated.image_url,
+        default_extra_price: updated.default_extra_price,
+      });
+    }
+    const created = await prisma.supplement.create({
+      data: { name, default_extra_price: 0, in_catalog: true, image_url: imageUrl },
+    });
+    return res.status(201).json({
+      id: created.id,
+      name: created.name,
+      image_url: created.image_url,
+      default_extra_price: created.default_extra_price,
+    });
+  }),
+);
+
+adminRouter.put(
+  '/extras-catalog/:type/:id',
+  validate(updateExtrasCatalogItemSchema),
+  asyncHandler(async (req, res) => {
+    const { type, id } = req.params as { type: 'sauces' | 'salads' | 'supplements'; id: string };
+    const body = req.validated?.body as { name?: string; image_url?: string | null };
+    const imageUrl = body.image_url === undefined ? undefined : body.image_url?.trim() || null;
+
+    // Sauce / Salad : un renommage ne doit pas entrer en collision avec la clé
+    // normalisée d'une AUTRE ligne du même catalogue (409).
+    const renameKey = body.name === undefined ? null : normalizeItemName(body.name);
+
+    const result = await prisma.$transaction(async (tx) => {
+      if (type === 'sauces') {
+        const current = await tx.sauce.findUnique({ where: { id } });
+        if (!current) throw ApiError.notFound('Sauce introuvable');
+        if (renameKey !== null && renameKey !== current.name_key) {
+          const clash = await tx.sauce.findUnique({ where: { name_key: renameKey } });
+          if (clash) throw ApiError.conflict(`Une autre sauce s'appelle déjà « ${clash.name} »`, 'SAUCE_NAME_TAKEN');
+        }
+        return tx.sauce.update({
+          where: { id },
+          data: {
+            ...(body.name !== undefined ? { name: body.name.trim(), name_key: renameKey as string } : {}),
+            ...(imageUrl !== undefined ? { image_url: imageUrl } : {}),
+          },
+        });
+      }
+      if (type === 'salads') {
+        const current = await tx.salad.findUnique({ where: { id } });
+        if (!current) throw ApiError.notFound('Salade introuvable');
+        if (renameKey !== null && renameKey !== current.name_key) {
+          const clash = await tx.salad.findUnique({ where: { name_key: renameKey } });
+          if (clash) throw ApiError.conflict(`Une autre salade s'appelle déjà « ${clash.name} »`, 'SALAD_NAME_TAKEN');
+        }
+        return tx.salad.update({
+          where: { id },
+          data: {
+            ...(body.name !== undefined ? { name: body.name.trim(), name_key: renameKey as string } : {}),
+            ...(imageUrl !== undefined ? { image_url: imageUrl } : {}),
+          },
+        });
+      }
+      // Suppléments : collision par nom normalisé sur TOUT le catalogue.
+      const current = await tx.supplement.findUnique({ where: { id } });
+      if (!current) throw ApiError.notFound('Supplement introuvable');
+      if (renameKey !== null && normalizeItemName(current.name) !== renameKey) {
+        const clash = (await tx.supplement.findMany()).find(
+          (item) => item.id !== id && normalizeItemName(item.name) === renameKey,
+        );
+        if (clash) throw ApiError.conflict(`Un autre supplément s'appelle déjà « ${clash.name} »`, 'SUPPLEMENT_NAME_TAKEN');
+      }
+      return tx.supplement.update({
+        where: { id },
+        data: {
+          ...(body.name !== undefined ? { name: body.name.trim() } : {}),
+          ...(imageUrl !== undefined ? { image_url: imageUrl } : {}),
+        },
+      });
+    }, TX_OPTS);
+
+    // Réponse unifiée : le supplement renvoie en plus son prix par défaut.
+    const { id: resultId, name: resultName, image_url: resultImage } = result;
+    return res.json(
+      type === 'supplements'
+        ? { id: resultId, name: resultName, image_url: resultImage, default_extra_price: (result as typeof result & { default_extra_price: number }).default_extra_price }
+        : { id: resultId, name: resultName, image_url: resultImage },
+    );
   }),
 );
 

@@ -14,6 +14,7 @@
     "db:migrate:dev": "prisma migrate dev",
     "db:push": "prisma db push",
     "db:seed": "tsx prisma/seed.ts",
+    "extras:import-images": "tsx scripts/import-extras-images.ts",
     "postinstall": "prisma generate",
     "db:sql": "mkdir -p prisma/migrations/0_init && prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script > prisma/migrations/0_init/migration.sql"
   },

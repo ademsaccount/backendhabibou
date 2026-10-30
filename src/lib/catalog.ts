@@ -1,7 +1,13 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 
 import { ApiError } from './errors';
-import { applicableSauces, applicableSupplements, sameName } from './categoryRules';
+import {
+  applicableSalads,
+  applicableSauces,
+  applicableSupplements,
+  normalizeItemName,
+  sameName,
+} from './categoryRules';
 
 /** Client Prisma : soit une transaction, soit le client principal (seed). */
 type Db = Prisma.TransactionClient | PrismaClient;
@@ -38,12 +44,19 @@ export type ProductSupplementDto = {
   default_extra_price: number;
   in_catalog: boolean;
   source: 'catalog' | 'shop';
+  image_url?: string | null;
 };
 
-/** Garnitures d'un commerce, par restaurant (chargées 1x, jamais en N+1). */
+/** Garniture shop (sauce / salade) résolue vers le catalogue global. */
+export type ShopSauceEntry = { id: string; restaurant_id: string; name: string; image_url: string | null };
+export type ShopSaladEntry = { id: string; restaurant_id: string; name: string; image_url: string | null };
+
+/** Garnitures d'un commerce, par restaurant (chargées 1x, jamais en N+1).
+ *  Les id sont des id de CATALOGUE global (Sauce/Salad/Supplement). */
 export type ShopExtras = {
-  supplements: { id: string; restaurant_id: string; name: string; extra_price: number; for_fricasse: boolean }[];
-  sauces: { id: string; restaurant_id: string; name: string }[];
+  supplements: { id: string; restaurant_id: string; name: string; image_url: string | null; extra_price: number; for_fricasse: boolean }[];
+  sauces: ShopSauceEntry[];
+  salads: ShopSaladEntry[];
 };
 
 /** Ingrédients + suppléments d'un produit (triés), pour include Prisma. */
@@ -67,7 +80,7 @@ type CatalogRowsShape = {
         supplement_id: string;
         sort_order: number;
         extra_price_override: number | null;
-        supplement: { id: string; name: string; default_extra_price: number; in_catalog: boolean };
+        supplement: { id: string; name: string; default_extra_price: number; in_catalog: boolean; image_url: string | null };
       }[]
     | null;
 };
@@ -77,10 +90,17 @@ export type ProductWithCatalogs<T extends object> = Omit<T, 'ingredients' | 'sup
   supplements: ProductSupplementDto[];
   /** Noms des sauces shop applicables (selon dish_type) — gratuites. */
   sauces: string[];
+  /** Noms des salades shop applicables (selon dish_type) — gratuites. */
+  salads: string[];
+  /** Sauces shop applicables, avec l'image du catalogue (gratuites). */
+  sauce_items: { id: string; name: string; image_url: string | null }[];
+  /** Salades shop applicables, avec l'image du catalogue (gratuites). */
+  salad_items: { id: string; name: string; image_url: string | null }[];
 };
 
 /**
- * Charge les garnitures (supplements + sauces) de plusieurs commerces en 2 requêtes.
+ * Charge les garnitures (supplements + sauces + salades) de plusieurs commerces
+ * en 3 requêtes parallèles avec jointure du catalogue global (toujours aucun N+1).
  * Renvoie une map restaurant_id -> extras ; absente = commerce sans garniture.
  */
 export async function loadShopExtras(
@@ -89,25 +109,55 @@ export async function loadShopExtras(
 ): Promise<Map<string, ShopExtras>> {
   const ids = Array.from(new Set(restaurantIds)).filter(Boolean);
   if (ids.length === 0) return new Map();
-  const [supplements, sauces] = await Promise.all([
-    db.restaurantSupplement.findMany({ where: { restaurant_id: { in: ids } }, orderBy: [{ sort_order: 'asc' }, { name: 'asc' }] }),
-    db.restaurantSauce.findMany({ where: { restaurant_id: { in: ids } }, orderBy: [{ sort_order: 'asc' }, { name: 'asc' }] }),
+  const [supplements, sauces, salads] = await Promise.all([
+    db.restaurantSupplement.findMany({
+      where: { restaurant_id: { in: ids } },
+      include: { supplement: true },
+      orderBy: [{ sort_order: 'asc' }, { supplement: { name: 'asc' } }],
+    }),
+    db.restaurantSauce.findMany({
+      where: { restaurant_id: { in: ids } },
+      include: { sauce: true },
+      orderBy: [{ sort_order: 'asc' }, { sauce: { name: 'asc' } }],
+    }),
+    db.restaurantSalad.findMany({
+      where: { restaurant_id: { in: ids } },
+      include: { salad: true },
+      orderBy: [{ sort_order: 'asc' }, { salad: { name: 'asc' } }],
+    }),
   ]);
   const map = new Map<string, ShopExtras>();
   for (const row of supplements) {
-    const extras = map.get(row.restaurant_id) ?? { supplements: [], sauces: [] };
+    const extras = map.get(row.restaurant_id) ?? { supplements: [], sauces: [], salads: [] };
     extras.supplements.push({
-      id: row.id,
+      // id = id global du Supplement du catalogue (même convention que ProductSupplement).
+      id: row.supplement.id,
       restaurant_id: row.restaurant_id,
-      name: row.name,
+      name: row.supplement.name,
+      image_url: row.supplement.image_url,
       extra_price: row.extra_price,
       for_fricasse: row.for_fricasse,
     });
     map.set(row.restaurant_id, extras);
   }
   for (const row of sauces) {
-    const extras = map.get(row.restaurant_id) ?? { supplements: [], sauces: [] };
-    extras.sauces.push({ id: row.id, restaurant_id: row.restaurant_id, name: row.name });
+    const extras = map.get(row.restaurant_id) ?? { supplements: [], sauces: [], salads: [] };
+    extras.sauces.push({
+      id: row.sauce.id,
+      restaurant_id: row.restaurant_id,
+      name: row.sauce.name,
+      image_url: row.sauce.image_url,
+    });
+    map.set(row.restaurant_id, extras);
+  }
+  for (const row of salads) {
+    const extras = map.get(row.restaurant_id) ?? { supplements: [], sauces: [], salads: [] };
+    extras.salads.push({
+      id: row.salad.id,
+      restaurant_id: row.restaurant_id,
+      name: row.salad.name,
+      image_url: row.salad.image_url,
+    });
     map.set(row.restaurant_id, extras);
   }
   return map;
@@ -131,6 +181,7 @@ export function applyShopExtras<T extends object>(
     extra_price: row.extra_price_override ?? row.supplement.default_extra_price,
     default_extra_price: row.supplement.default_extra_price,
     in_catalog: row.supplement.in_catalog,
+    image_url: row.supplement.image_url,
     source: 'catalog' as const,
   }));
 
@@ -143,10 +194,15 @@ export function applyShopExtras<T extends object>(
           extra_price: shop.extra_price,
           default_extra_price: shop.extra_price,
           in_catalog: false,
+          image_url: shop.image_url,
           source: 'shop' as const,
         }))
     : [];
-  const sauces = extras ? applicableSauces(dishType, extras.sauces).map((s) => s.name) : [];
+  const sauceRows = extras ? applicableSauces(dishType, extras.sauces) : [];
+  const saladRows = extras ? applicableSalads(dishType, extras.salads) : [];
+  // Noms seuls (contrat client inchangé) + items enrichis (image du catalogue).
+  const sauces = sauceRows.map((s) => s.name);
+  const salads = saladRows.map((s) => s.name);
 
   return {
     ...product,
@@ -157,6 +213,9 @@ export function applyShopExtras<T extends object>(
     })),
     supplements: [...productSupplements, ...shopSupplements],
     sauces,
+    salads,
+    sauce_items: sauceRows.map((s) => ({ id: s.id, name: s.name, image_url: s.image_url })),
+    salad_items: saladRows.map((s) => ({ id: s.id, name: s.name, image_url: s.image_url })),
   } as ProductWithCatalogs<T> & { flavor?: string | null };
 }
 
@@ -285,4 +344,76 @@ export async function syncProductSupplements(
     });
     index += 1;
   }
+}
+
+/* ------------- Catalogue global des garnitures shop (sauces / salades / supplements) ------------- */
+
+/** Ligne de garniture shop reçue de l'admin : id de catalogue OU nom (find-or-create). */
+export type ShopExtraItemInput = { id?: string | null; name?: string | null };
+
+/**
+ * Résout (find-or-create) une sauce du catalogue global par son id ou son nom
+ * normalisé. Un nom inconnu crée la ligne SANS image — l'import de menu
+ * (qui ne connaît que des noms) continue de fonctionner.
+ */
+export async function resolveCatalogSauce(tx: Db, row: ShopExtraItemInput): Promise<string | null> {
+  if (row.id) {
+    const existing = await tx.sauce.findUnique({ where: { id: row.id } });
+    if (!existing) throw ApiError.badRequest(`Sauce introuvable : ${row.id}`, 'SAUCE_NOT_FOUND');
+    return existing.id;
+  }
+  const name = row.name?.trim();
+  if (!name) return null;
+  const key = normalizeItemName(name);
+  const found = await tx.sauce.findUnique({ where: { name_key: key } });
+  if (found) return found.id;
+  const created = await tx.sauce.create({ data: { name, name_key: key } });
+  return created.id;
+}
+
+/** Pareil pour les salades fraîches (gratuites, jamais tarifées). */
+export async function resolveCatalogSalad(tx: Db, row: ShopExtraItemInput): Promise<string | null> {
+  if (row.id) {
+    const existing = await tx.salad.findUnique({ where: { id: row.id } });
+    if (!existing) throw ApiError.badRequest(`Salade introuvable : ${row.id}`, 'SALAD_NOT_FOUND');
+    return existing.id;
+  }
+  const name = row.name?.trim();
+  if (!name) return null;
+  const key = normalizeItemName(name);
+  const found = await tx.salad.findUnique({ where: { name_key: key } });
+  if (found) return found.id;
+  const created = await tx.salad.create({ data: { name, name_key: key } });
+  return created.id;
+}
+
+/**
+ * Pareil pour les suppléments du catalogue global "Supplement" (pas de colonne
+ * name_key) : le catalogue est petit, on le charge et on compare les noms
+ * normalisés — « Thon » et « thon » ne créent donc jamais deux lignes.
+ * Une ligne existante avec in_catalog=false est promue in_catalog=true
+ * (elle est désormais une garniture shop => elle doit être visible du
+ * catalogue) et son image reste inchangée.
+ */
+export async function resolveCatalogSupplement(tx: Db, row: ShopExtraItemInput): Promise<string | null> {
+  if (row.id) {
+    const existing = await tx.supplement.findUnique({ where: { id: row.id } });
+    if (!existing) throw ApiError.badRequest(`Supplement introuvable : ${row.id}`, 'SUPPLEMENT_NOT_FOUND');
+    return existing.id;
+  }
+  const name = row.name?.trim();
+  if (!name) return null;
+  const key = normalizeItemName(name);
+  const all = await tx.supplement.findMany();
+  const found = all.find((item) => normalizeItemName(item.name) === key);
+  if (found) {
+    if (!found.in_catalog) {
+      await tx.supplement.update({ where: { id: found.id }, data: { in_catalog: true } });
+    }
+    return found.id;
+  }
+  const created = await tx.supplement.create({
+    data: { name, default_extra_price: 0, in_catalog: true },
+  });
+  return created.id;
 }

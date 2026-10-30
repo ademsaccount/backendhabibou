@@ -161,6 +161,7 @@ model Restaurant {
   // aux produits selon de leur dish_type — voir src/lib/categoryRules.ts).
   restaurant_supplements RestaurantSupplement[]
   restaurant_sauces      RestaurantSauce[]
+  restaurant_salads      RestaurantSalad[]
   creator   User?      @relation("RestaurantCreatedBy", fields: [created_by_admin_id], references: [id])
 
   @@index([latitude, longitude])
@@ -237,9 +238,12 @@ model Supplement {
   // false = supplement "local" (saisi pour un seul produit, absent du selecteur).
   in_catalog          Boolean  @default(true)
   created_by_admin    String?
+  image_url           String?
   created_at          DateTime @default(now())
 
-  products ProductSupplement[]
+  products    ProductSupplement[]
+  // Commerces qui ont coche ce supplement dans leurs garnitures shop.
+  restaurants RestaurantSupplement[]
 }
 
 model ProductSupplement {
@@ -256,39 +260,82 @@ model ProductSupplement {
   @@index([supplement_id])
 }
 
-// Supplement au niveau du commerce (garniture cochee une fois pour tout le shop) :
+// Supplement au niveau du commerce : LIAISON entre un commerce et le
+// catalogue global Supplement (garniture coquee une fois pour tout le shop) :
 // applique automatiquement aux produits selon leur dish_type via src/lib/categoryRules.ts.
 // Sans relation produit : il complete (ou coexiste avec) ProductSupplement.
 model RestaurantSupplement {
-  id            String  @id @default(uuid())
   restaurant_id String
-  name          String
-  // Prix de l'ajout (DT) — 0.5 par defaut.
+  supplement_id String
+  // Prix de l'ajout (DT) pour CE commerce — 0.5 par defaut (le catalogue garde
+  // Supplement.default_extra_price comme proposition).
   extra_price   Float   @default(0.5)
   // true = aussi applique aux Fricasses (les sauces ne le sont JAMAIS).
   for_fricasse  Boolean @default(false)
   sort_order    Int     @default(0)
-  created_at    DateTime @default(now())
 
   restaurant Restaurant @relation(fields: [restaurant_id], references: [id], onDelete: Cascade)
+  supplement Supplement @relation(fields: [supplement_id], references: [id], onDelete: Cascade)
 
-  @@unique([restaurant_id, name])
-  @@index([restaurant_id])
+  @@id([restaurant_id, supplement_id])
+  @@index([supplement_id])
 }
 
 // Sauce au niveau du commerce : gratuite, appliquee automatiquement (jamais aux
-// Fricasses) et jamais tarifée comme un supplement.
+// Fricasses) et jamais tarifée comme un supplement. Le catalogue global Sauce
+// porte le nom (+ image) ; la table ci-dessous ne fait que la LIER au commerce.
 model RestaurantSauce {
-  id            String  @id @default(uuid())
   restaurant_id String
-  name          String
+  sauce_id      String
   sort_order    Int     @default(0)
-  created_at    DateTime @default(now())
 
   restaurant Restaurant @relation(fields: [restaurant_id], references: [id], onDelete: Cascade)
+  sauce      Sauce      @relation(fields: [sauce_id], references: [id], onDelete: Cascade)
 
-  @@unique([restaurant_id, name])
-  @@index([restaurant_id])
+  @@id([restaurant_id, sauce_id])
+  @@index([sauce_id])
+}
+
+// Salade au niveau du commerce (garnitures fraîches : laitue, tomate, oignon,
+// concombre…) : GRATUITE, jamais tarifée, appliquée automatiquement seulement aux
+// Sandwich, Burger, Makloub, Libanais et Baguette farcie (jamais Fricassé/Tacos/Cornet).
+// LIAISON vers le catalogue global Salad (nom + image).
+model RestaurantSalad {
+  restaurant_id String
+  salad_id      String
+  sort_order    Int     @default(0)
+
+  restaurant Restaurant @relation(fields: [restaurant_id], references: [id], onDelete: Cascade)
+  salad      Salad      @relation(fields: [salad_id], references: [id], onDelete: Cascade)
+
+  @@id([restaurant_id, salad_id])
+  @@index([salad_id])
+}
+
+// Catalogue GLOBAL de sauces du commerce : une ligne par nom normalise
+// (name_key) partagee par tous les commerces, avec une image optionnelle.
+// Gratuites, jamais tarifées.
+model Sauce {
+  id         String   @id @default(uuid())
+  name       String
+  // Cle de dedup : minuscules, accents supprimes, trim + espaces internes réduits.
+  name_key   String   @unique
+  image_url  String?
+  created_at DateTime @default(now())
+
+  restaurants RestaurantSauce[]
+}
+
+// Catalogue GLOBAL de salades du commerce : une ligne par nom normalise,
+// image optionnelle. Gratuites, jamais tarifées.
+model Salad {
+  id         String   @id @default(uuid())
+  name       String
+  name_key   String   @unique
+  image_url  String?
+  created_at DateTime @default(now())
+
+  restaurants RestaurantSalad[]
 }
 
 // Categories de medicaments du flux Pharmacie â€” table configurable cote admin (pas en dur).

@@ -12,7 +12,7 @@ import { pushAdmins, pushNewMessageToUser, pushOrderStatusToUser } from '../lib/
 import { emitToAdmins, emitToOrder } from '../socket/io';
 import { createPaymentIntent, stripeEnabled } from '../lib/stripe';
 import { orderInclude } from '../lib/orderInclude';
-import { mergeSupplementEntries } from '../lib/categoryRules';
+import { mergeSupplementEntries, normalizeDishType } from '../lib/categoryRules';
 import type { Prisma } from '@prisma/client';
 
 /** Recolte {name, price} dans le JSON de catalog d'options d'un produit. */
@@ -50,9 +50,31 @@ function collectSelectedNames(node: unknown, out: string[]): void {
   }
 }
 
-/** Supplément en MAD : uniquement via le catalog serveur (le prix client est ignore). */
+/** Clés de groupes d'options GRATUITES (sauces et salades du commerce). */
+const FREE_OPTION_KEYS = new Set(['sauces', 'salades']);
+
+/**
+ * Recolte les noms choisis sous les groupes gratuits (« Sauces », « Salades »,
+ * casse/accents ignorés) — ils ne doivent JAMAIS être facturés, même si une
+ * entrée prix du catalogue porte exactement ce nom.
+ */
+function collectFreeOptionNames(node: unknown): Set<string> {
+  const out = new Set<string>();
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return out;
+  const obj = node as Record<string, unknown>;
+  for (const [key, value] of Object.entries(obj)) {
+    if (!FREE_OPTION_KEYS.has(normalizeDishType(key))) continue;
+    const names: string[] = [];
+    collectSelectedNames(value, names);
+    for (const name of names) out.add(normalizeDishType(name));
+  }
+  return out;
+}
+
+/** Supplément en DT : uniquement via le catalog serveur (le prix client est ignore). */
 function optionDelta(catalogOptions: unknown, selectedOptions: unknown): number {
   if (selectedOptions == null) return 0;
+  const freeNames = collectFreeOptionNames(selectedOptions);
   const entries: { name: string; price: number }[] = [];
   collectCatalogEntries(catalogOptions, entries);
   if (entries.length === 0) return 0;
@@ -64,6 +86,10 @@ function optionDelta(catalogOptions: unknown, selectedOptions: unknown): number 
   for (const name of names) {
     if (seen.has(name)) continue;
     seen.add(name);
+    // Garde-fou : un nom sous « Sauces »/« Salades » n'est JAMAIS facturé,
+    // même si une entrée prix du catalogue porte ce nom exact (limitation
+    // connue d'optionDelta : il matche les noms sans tenir compte du groupe).
+    if (freeNames.has(normalizeDishType(name))) continue;
     delta += byName.get(name) ?? 0;
   }
   return delta;
@@ -114,24 +140,30 @@ orderRouter.post(
       // produit gagne en cas de conflit de nom (casse/accents ignorés).
       //
       // Structure `options` du client — proposée (et rétro-compatible) :
-      //   { "Sauces": ["Harissa", ...], "Suppléments": ["Thon", ...] }
+      //   { "Sauces": ["Harissa", ...], "Salades": ["Laitue", ...], "Suppléments": ["Thon", ...] }
       // (ou tout objet fini de strings/objets {name}, comme avant).
       // - Sauces shop : TOUJOURS GRATUITES — elles ne font JAMAIS partie de ce
       //   catalogue de prix (aucun risque qu'une sauce soit tarifée comme un
       //   supplément) ; elles se contentent d'être sélectionnées dans options.
+      // - Salades shop : GRATUITES — pareil que les sauces (optionDelta refuse
+      //   de facturer un nom sous la clé « Salades », même en collision avec
+      //   un supplément du catalogue).
       // - Suppléments shop : prix = RestaurantSupplement.extra_price, recalculé
       //   ici côté serveur (prix client ignoré).
       const supplementRows = await tx.productSupplement.findMany({
         where: { product_id: { in: productIds } },
         include: { supplement: true },
       });
+      // Garnitures shop : la table RestaurantSupplement est une LIAISON vers le
+      // catalogue global Supplement — jointure pour récupérer le nom.
       const shopSupplementRows = await tx.restaurantSupplement.findMany({
         where: { restaurant_id: { in: [...new Set(products.map((p) => p.restaurant_id))] } },
+        include: { supplement: { select: { id: true, name: true } } },
       });
-      const shopSupplementsByRestaurant = new Map<string, typeof shopSupplementRows>();
+      const shopSupplementsByRestaurant = new Map<string, { name: string; for_fricasse: boolean; extra_price: number }[]>();
       for (const row of shopSupplementRows) {
         const list = shopSupplementsByRestaurant.get(row.restaurant_id) ?? [];
-        list.push(row);
+        list.push({ name: row.supplement.name, for_fricasse: row.for_fricasse, extra_price: row.extra_price });
         shopSupplementsByRestaurant.set(row.restaurant_id, list);
       }
       const supplementsByProduct = new Map<string, { name: string; price: number }[]>();
