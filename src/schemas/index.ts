@@ -35,6 +35,11 @@ export const restaurantsQuery = z.object({
   q: z.string().trim().min(1).optional(),
 });
 
+/** GET /restaurants/:id : mode de chargement des produits (additif, 'full' = défaut). */
+export const restaurantDetailQuery = z.object({
+  include_products: z.enum(['full', 'menu', 'none']).optional(),
+});
+
 /** Filtres du catalogue produits (flux Repas / Épicerie / Pharmacie). */
 export const productsQuery = z.object({
   // "Par type de plat" : Makloub, Pizza, Fricassé...

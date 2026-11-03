@@ -134,6 +134,86 @@ async function main() {
   const frites = burgerMenu.data.products.find((p) => p.name === 'Frites Maison');
   check('Classic Burger a des options', Boolean(classic?.options));
 
+  console.log('— Spécialités + recherche description + include_products —');
+  const restosSp = await expect('GET /restaurants (specialities)', 'GET', '/restaurants', {}, 200);
+  check(
+    'specialities: champ present partout (array)',
+    Array.isArray(restosSp.data) && restosSp.data.every((r) => Array.isArray(r.specialities)),
+    JSON.stringify(restosSp.data?.[0]?.specialities),
+  );
+  const spById = (id) => restosSp.data?.find((r) => r.id === id);
+  // Le Petit Chef : Plat (Tajine/Couscous) + Pizza + Makloub + Fricassé + Sandwich.
+  check(
+    'resto-1 : [fast_food, pizza, plats]',
+    JSON.stringify(spById('seed-resto-1')?.specialities) === JSON.stringify(['fast_food', 'pizza', 'plats']),
+    JSON.stringify(spById('seed-resto-1')?.specialities),
+  );
+  // Burger Time : Burger (-> burger ET fast_food) + Pizza + Makloub + Plat + Sandwich.
+  check(
+    'resto-2 : [fast_food, burger, pizza, plats]',
+    JSON.stringify(spById('seed-resto-2')?.specialities) === JSON.stringify(['fast_food', 'burger', 'pizza', 'plats']),
+    JSON.stringify(spById('seed-resto-2')?.specialities),
+  );
+  // Épicerie : produits sans dish_type -> specialities [].
+  check(
+    'resto-3 (epicerie) : specialities []',
+    spById('seed-resto-3')?.specialities?.length === 0,
+    JSON.stringify(spById('seed-resto-3')?.specialities),
+  );
+
+  const qName = await expect('GET /restaurants?q (nom)', 'GET', '/restaurants?q=burger%20time', {}, 200);
+  check(
+    'recherche par nom toujours operationnelle',
+    qName.data?.length === 1 && qName.data?.[0]?.id === 'seed-resto-2',
+    JSON.stringify(qName.data?.map((r) => r.name)),
+  );
+  const qDesc = await expect('GET /restaurants?q (description)', 'GET', '/restaurants?q=fait%20maison', {}, 200);
+  check(
+    'recherche dans la description',
+    qDesc.data?.length === 1 && qDesc.data?.[0]?.id === 'seed-resto-1',
+    JSON.stringify(qDesc.data?.map((r) => r.name)),
+  );
+
+  // include_products=none : colonnes du commerce seulement.
+  const detailNone = await expect('GET /restaurants/:id (none)', 'GET', '/restaurants/seed-resto-1?include_products=none', {}, 200);
+  check('none : products []', Array.isArray(detailNone.data?.products) && detailNone.data.products.length === 0, JSON.stringify(detailNone.data?.products));
+  check('none : colonnes du commerce presentes', detailNone.data?.name === 'Le Petit Chef' && typeof detailNone.data?.is_open === 'boolean', JSON.stringify(detailNone.data)?.slice(0, 200));
+  // include_products=menu : sélection allégée, indisponibles inclus, sans garnitures.
+  const detailMenu = await expect('GET /restaurants/:id (menu)', 'GET', '/restaurants/seed-resto-1?include_products=menu', {}, 200);
+  const LIGHT_KEYS = ['id', 'restaurant_id', 'name', 'flavor', 'description', 'image_url', 'price', 'category', 'dish_type', 'is_available', 'sizes'];
+  const firstMenu = detailMenu.data?.products?.[0];
+  check(
+    'menu : sélection allégée exacte',
+    Boolean(firstMenu) &&
+      JSON.stringify(Object.keys(firstMenu ?? {}).sort()) === JSON.stringify([...LIGHT_KEYS].sort()),
+    JSON.stringify(Object.keys(firstMenu ?? {})),
+  );
+  check(
+    'menu : sans ingredients/supplements/sauces/salades/options',
+    detailMenu.data?.products?.every?.(
+      (p) => p.ingredients === undefined && p.supplements === undefined && p.sauces === undefined && p.salads === undefined && p.sauce_items === undefined && p.salad_items === undefined && p.options === undefined,
+    ),
+    JSON.stringify(detailMenu.data?.products?.length),
+  );
+  check(
+    'menu : indisponibles inclus (>= full)',
+    detailMenu.data?.products?.length >= resto.data?.products?.length,
+    `${detailMenu.data?.products?.length} vs ${resto.data?.products?.length}`,
+  );
+  // include_products=full : exactement le payload historique.
+  const detailFull = await expect('GET /restaurants/:id (full explicite)', 'GET', '/restaurants/seed-resto-1?include_products=full', {}, 200);
+  check(
+    'full explicite = appel par défaut (rétro-compat)',
+    JSON.stringify(detailFull.data) === JSON.stringify(resto.data),
+    'payload diff',
+  );
+  check(
+    'full : ingredients + garnitures presentes',
+    Array.isArray(detailFull.data?.products?.[0]?.ingredients) && Array.isArray(detailFull.data?.products?.[0]?.sauces),
+    JSON.stringify(detailFull.data?.products?.[0])?.slice(0, 200),
+  );
+
+
   console.log('— Catalogue : Repas / Épicerie / Pharmacie —');
   const dishTypes = await expect('GET /dish-types', 'GET', '/dish-types', {}, 200);
   check('types de plat seeded (>=4)', Array.isArray(dishTypes.data) && dishTypes.data.length >= 4, JSON.stringify(dishTypes.data));
@@ -311,6 +391,31 @@ async function main() {
   const prodNoOpts = await expect('GET product options null', 'GET', `/products/${prod.data.id}`, {}, 200);
   check('options effacees (null)', prodNoOpts.data?.options === null, JSON.stringify(prodNoOpts.data?.options));
 
+  // — Spécialités : seuls les produits disponibles comptent ( commerce jetable ) —
+  const tajine = await expect('POST Tajine Smoke (plats)', 'POST', `/admin/restaurants/${resto2.data.id}/products`, {
+    token: admin,
+    body: { name: 'Tajine Smoke', price: 30, dish_type: 'Tajine' },
+  }, 201);
+  const spOnRes = await expect('GET /restaurants?q=Smoke Snack (Tajine dispo)', 'GET', '/restaurants?q=Smoke%20Snack', {}, 200);
+  const spSnack = spOnRes.data?.find((r) => r.name?.startsWith('Smoke Snack'));
+  check(
+    'specialities [plats] avant mise hors ligne',
+    JSON.stringify(spSnack?.specialities) === JSON.stringify(['plats']),
+    JSON.stringify(spOnRes.data?.map((r) => [r.name, r.specialities])),
+  );
+  await expect('PUT Tajine indisponible', 'PUT', `/admin/products/${tajine.data.id}`, {
+    token: admin,
+    body: { is_available: false },
+  }, 200);
+  const spOffRes = await api('GET', '/restaurants?q=Smoke%20Snack', {});
+  const spSnackOff = spOffRes.data?.find((r) => r.name?.startsWith('Smoke Snack'));
+  check(
+    'specialities [] apres indisponibilite (produit non dispo ne compte pas)',
+    spSnackOff?.name && JSON.stringify(spSnackOff.specialities) === '[]',
+    JSON.stringify(spOffRes.data?.map((r) => [r.name, r.specialities])),
+  );
+  await expect('DELETE Tajine (non commandé)', 'DELETE', `/admin/products/${tajine.data.id}`, { token: admin }, 204);
+
   const localIngredient = `Ingr local ${stamp}`;
   const localSupplement = `Supp local ${stamp}`;
   await expect('PUT dish_type + ingredients + supplements', 'PUT', `/admin/products/${prod.data.id}`, {
@@ -424,7 +529,8 @@ async function main() {
       latitude: 36.8065,
       longitude: 10.1815,
       is_open: true,
-      opening_hours: { open: '09:00', close: '22:30' },
+      // Pas d'horaires : le drapeau is_open seul décide → open 24/7, le smoke
+      // ne dépend plus de l'heure locale (les vérifs horaires sont sur Smoke Snack).
     },
   }, 201);
 
@@ -556,7 +662,7 @@ async function main() {
       latitude: 36.8066,
       longitude: 10.1816,
       is_open: true,
-      opening_hours: { open: '09:00', close: '22:30' },
+      // Sans horaires, même raison que Smoke Extras (indépendance du l'heure).
     },
   }, 201);
   await expect('PUT extras sharing resto (par nom)', 'PUT', `/admin/restaurants/${sharingResto.data.id}/extras`, {

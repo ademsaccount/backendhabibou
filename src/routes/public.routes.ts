@@ -7,12 +7,14 @@ import {
   createAddressSchema,
   idParam,
   productsQuery,
+  restaurantDetailQuery,
   restaurantsQuery,
   updateAddressSchema,
 } from '../schemas';
 import { haversineKm, roundKm } from '../lib/geo';
 import { loadShopExtras, productCatalogInclude, withCatalogs } from '../lib/catalog';
 import { isOpenNow } from '../lib/open';
+import { specialitiesFor } from '../lib/specialities';
 import type { Prisma } from '@prisma/client';
 
 export const publicRouter = Router();
@@ -39,6 +41,30 @@ function withOpenRestaurant<T extends { restaurant?: { is_open: boolean; opening
   return { ...product, restaurant: { ...product.restaurant, is_open: isOpenNow(product.restaurant) } };
 }
 
+/** Sélection allégée d'un produit pour GET /restaurants/:id?include_products='menu' :
+ * assez pour l'écran menu client (nom, image, prix, catégorie… + `sizes` pour
+ * l'indice « à partir de ») — rien d'autre (pas d'ingredients/supplements/
+ * sauces/salades/options), jamais les garnitures du commerce. */
+const menuProductSelect: Prisma.ProductSelect = {
+  id: true,
+  restaurant_id: true,
+  name: true,
+  flavor: true,
+  description: true,
+  image_url: true,
+  price: true,
+  category: true,
+  dish_type: true,
+  is_available: true,
+  sizes: true,
+};
+
+/** Ordre commun des produits (détail full et menu). */
+const productMenuOrderBy = [
+  { category: 'asc' },
+  { name: 'asc' },
+] satisfies Prisma.ProductOrderByWithRelationInput[];
+
 publicRouter.get(
   '/restaurants',
   validate({ query: restaurantsQuery }),
@@ -53,16 +79,43 @@ publicRouter.get(
     const restaurants = await prisma.restaurant.findMany({
       where: {
         ...(category ? { category: category as never } : {}),
-        ...(q ? { name: { contains: q, mode: 'insensitive' } } : {}),
+        // Recherche : nom OU description (insensible casse/accents non requis ici,
+        // contains insensitive comme avant sur les deux champs).
+        ...(q
+          ? {
+              OR: [
+                { name: { contains: q, mode: 'insensitive' } },
+                { description: { contains: q, mode: 'insensitive' } },
+              ],
+            }
+          : {}),
       },
       orderBy: { created_at: 'desc' },
     });
+
+    // Spécialités de TOUS les commerces renvoyés : UNE seule requête groupBy
+    // (restaurant_id x dish_type des produits disponibles), puis mapping JS.
+    const ids = restaurants.map((r) => r.id);
+    const grouped =
+      ids.length > 0
+        ? await prisma.product.groupBy({
+            by: ['restaurant_id', 'dish_type'],
+            where: { restaurant_id: { in: ids }, is_available: true, dish_type: { not: null } },
+          })
+        : [];
+    const dishTypesByRestaurant = new Map<string, (string | null)[]>();
+    for (const row of grouped) {
+      const list = dishTypesByRestaurant.get(row.restaurant_id);
+      if (list) list.push(row.dish_type);
+      else dishTypesByRestaurant.set(row.restaurant_id, [row.dish_type]);
+    }
 
     const result = restaurants.map((r) => ({
       ...r,
       is_open: isOpenNow(r),
       distance_km:
         lat != null && lng != null ? roundKm(haversineKm(lat, lng, r.latitude, r.longitude)) : null,
+      specialities: specialitiesFor(dishTypesByRestaurant.get(r.id) ?? []),
     }));
 
     // Ouverts d'abord, puis par distance croissante (les fermetures passent en fin de liste).
@@ -78,9 +131,41 @@ publicRouter.get(
 
 publicRouter.get(
   '/restaurants/:id',
-  validate({ params: idParam }),
+  validate({ params: idParam, query: restaurantDetailQuery }),
   asyncHandler(async (req, res) => {
     const { id } = req.params;
+    const { include_products } = (req.validated?.query ?? {}) as {
+      include_products?: 'full' | 'menu' | 'none';
+    };
+    const mode = include_products ?? 'full';
+
+    // 'none' : colonnes du commerce uniquement, is_open recalculé comme
+    // partout, products vide — aucune requête produits/garnitures.
+    if (mode === 'none') {
+      const restaurant = await prisma.restaurant.findUnique({ where: { id } });
+      if (!restaurant) throw ApiError.notFound('Commerce introuvable');
+      res.json({ ...restaurant, is_open: isOpenNow(restaurant), products: [] });
+      return;
+    }
+
+    // 'menu' : produits allégés (disponibles ET indisponibles, comme 'full'),
+    // sans ingredients/supplements/options ni garnitures du commerce.
+    if (mode === 'menu') {
+      const restaurant = await prisma.restaurant.findUnique({
+        where: { id },
+        include: {
+          products: {
+            select: menuProductSelect,
+            orderBy: productMenuOrderBy,
+          },
+        },
+      });
+      if (!restaurant) throw ApiError.notFound('Commerce introuvable');
+      res.json({ ...restaurant, is_open: isOpenNow(restaurant), products: restaurant.products });
+      return;
+    }
+
+    // 'full' (défaut) : comportement historique exact.
     const restaurant = await prisma.restaurant.findUnique({
       where: { id },
       include: {
