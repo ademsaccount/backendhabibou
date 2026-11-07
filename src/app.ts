@@ -12,6 +12,7 @@ import { adminCustomRequestRouter, customRequestRouter } from './routes/customRe
 import { orderRouter } from './routes/order.routes';
 import { deviceRouter } from './routes/device.routes';
 import { userRouter } from './routes/user.routes';
+import savedCartRouter from './routes/savedCart.routes';
 import { adminRouter } from './routes/admin.routes';
 import { livreurRouter } from './routes/livreur.routes';
 // --- FIN DÉSACTIVÉ ---
@@ -45,6 +46,8 @@ export function createApp() {
   app.use('/notifications', notificationRouter);
   app.use('/uploads', uploadRouter);
   app.use('/users', userRouter);
+  // Paniers sauvegardés du profil (habichou : "Saved carts").
+  app.use('/saved-carts', savedCartRouter);
 
   // Admin
   app.use('/admin/custom-requests', adminCustomRequestRouter);

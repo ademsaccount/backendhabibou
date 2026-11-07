@@ -2,9 +2,7 @@ import type { Order, OrderStatus } from '@prisma/client';
 import { env } from '../config/env';
 import { prisma } from '../lib/prisma';
 import { ApiError } from '../lib/errors';
-// --- DÉSACTIVÉ : gestion de plusieurs livreurs (l'admin fait office de livreur unique) ---
-// import { haversineKm, roundKm } from '../lib/geo';
-// --- FIN DÉSACTIVÉ ---
+import { haversineKm } from '../lib/geo';
 import { notify, notifyAdmins } from '../lib/notify';
 import { pushOrderStatusToUser } from '../lib/push';
 import { logger } from '../lib/logger';
@@ -329,11 +327,43 @@ async function resolveOrder(id: string): Promise<Order> {
 // }
 // --- FIN DÉSACTIVÉ ---
 
+/** Point GPS minimal d'un arret de la course (commerce ou adresse client). */
+export type GpsStop = { latitude: number; longitude: number };
+
 /**
- * Frais de livraison d'une commande : base au premier commerce, supplement
- * par commerce supplementaire (le livreur enchaine les pickups dans une
- * SEULE commande). Meme formule cote app : DELIVERY_FEE + HOP × (shops−1).
+ * Distances (km a vol d'oiseau) de la course pickup, dans l'ordre du panier :
+ * commerce 1 -> commerce 2 -> ... -> dernier commerce -> client.
  */
-export function deliveryFee(shopsCount = 1): number {
-  return env.DELIVERY_FEE + Math.max(0, shopsCount - 1) * env.DELIVERY_HOP_FEE;
+export function pickupLegsKm(stops: readonly GpsStop[], client: GpsStop): number[] {
+  const points = [...stops, client];
+  const legs: number[] = [];
+  for (let i = 0; i < points.length - 1; i += 1) {
+    legs.push(
+      haversineKm(
+        points[i].latitude,
+        points[i].longitude,
+        points[i + 1].latitude,
+        points[i + 1].longitude,
+      ),
+    );
+  }
+  return legs;
+}
+
+/**
+ * Frais de livraison d'une commande : fixe de base + frais/km sur la course
+ * enchainee shop1 -> shop2 -> ... -> client (chaque troncon arrondi au km
+ * superieur, distance a vol d'oiseau) + supplement par commerce supplementaire
+ * (le livreur enchaine les pickups dans une SEULE commande). Meme formule cote
+ * app. `legsKm = null` (coordonnee indisponible, ou course sans commerce connu
+ * comme la Demande specifique) : fixe de base uniquement.
+ */
+export function deliveryFee(legsKm: readonly number[] | null, extraShops = 0): number {
+  if (legsKm == null) return env.DELIVERY_BASE_FEE;
+  const km = legsKm.reduce((sum, leg) => sum + Math.max(0, Math.ceil(leg)), 0);
+  return (
+    env.DELIVERY_BASE_FEE +
+    km * env.DELIVERY_PER_KM_FEE +
+    Math.max(0, extraShops) * env.DELIVERY_HOP_FEE
+  );
 }

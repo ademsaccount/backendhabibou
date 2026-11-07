@@ -134,6 +134,36 @@ export const createOrderSchema = z.object({
   }),
 });
 
+/* ------------- Paniers sauvegardés (profil : « Saved carts ») ------------- */
+/** Ligne du snapshot : mêmes règles que createOrderSchema — la normalisation
+ *  `options` (qté 1..MAX_EXTRA_QTY) est refaite côté route, comme pour /orders. */
+const savedCartItemSchema = z.object({
+  product_id: z.string().min(1),
+  quantity: z.number().int().min(1).max(50),
+  notes: z.string().max(300).optional(),
+  options: z.unknown().optional(),
+  size_label: z.string().trim().min(1).max(60).optional(),
+});
+
+export const createSavedCartSchema = z.object({
+  body: z.object({
+    name: z.string().trim().max(30).optional(),
+    items: z.array(savedCartItemSchema).min(1).max(30),
+  }),
+});
+
+export const updateSavedCartSchema = z.object({
+  params: idParam,
+  body: z
+    .object({
+      name: z.string().trim().max(30).optional(),
+      items: z.array(savedCartItemSchema).min(1).max(30).optional(),
+    })
+    .refine((body) => body.name !== undefined || body.items !== undefined, {
+      message: 'Rien a mettre a jour',
+    }),
+});
+
 export const rateOrderSchema = z.object({
   params: idParam,
   body: z.object({

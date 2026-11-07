@@ -34,7 +34,8 @@ customRequestRouter.post(
     const address = await prisma.address.findUnique({ where: { id: body.address_id } });
     if (!address || address.user_id !== req.user!.id) throw ApiError.notFound('Adresse introuvable');
 
-    const fee = deliveryFee();
+    // Demande specifique : aucun commerce connu a l'avance -> frais fixes de base.
+    const fee = deliveryFee(null);
     const { cr, order } = await prisma.$transaction(async (tx) => {
       const created = await tx.customRequest.create({
         data: {

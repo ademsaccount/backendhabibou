@@ -14,9 +14,12 @@ const EnvSchema = z.object({
   JWT_REFRESH_SECRET: z.string().min(8, 'JWT_REFRESH_SECRET doit faire au moins 8 caracteres'),
   JWT_ACCESS_TTL: z.string().default('15m'),
   JWT_REFRESH_TTL: z.string().default('7d'),
-  DELIVERY_FEE: z.coerce.number().min(0).default(15),
+  /** Frais fixes par course. */
+  DELIVERY_BASE_FEE: z.coerce.number().min(0).default(2),
+  /** Frais au kilometre : ligne droite, chaque troncon arrondi au km superieur. */
+  DELIVERY_PER_KM_FEE: z.coerce.number().min(0).default(0.5),
   /** Supplement par commerce supplementaire dans une meme commande (tour du livreur). */
-  DELIVERY_HOP_FEE: z.coerce.number().min(0).default(8),
+  DELIVERY_HOP_FEE: z.coerce.number().min(0).default(0.5),
   /** Fuseau horaire utilise pour comparer opening_hours a l'heure courante. */
   BUSINESS_TZ: z.string().default('Africa/Tunis'),
   STRIPE_SECRET_KEY: z.string().default(''),

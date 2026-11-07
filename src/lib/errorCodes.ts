@@ -87,6 +87,9 @@ export const ERROR_CODES = [
   'LIVREUR_HAS_ACTIVE_ORDERS',
   'NOT_CLAIMED',
   'NOT_RECLAIMABLE',
+  // panier sauvegarde
+  'SAVED_CART_LIMIT',
+  'SAVED_CART_NOT_FOUND',
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];

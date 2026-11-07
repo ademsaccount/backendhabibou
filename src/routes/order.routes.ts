@@ -4,7 +4,7 @@ import { ApiError, asyncHandler } from '../lib/errors';
 import { requireAuth, requireRole } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { createOrderSchema, idParam, orderMessageSchema, approvePriceSchema, orderStatusFilterQuery, rateOrderSchema } from '../schemas';
-import { deliveryFee } from '../services/order.service';
+import { deliveryFee, pickupLegsKm, type GpsStop } from '../services/order.service';
 import { routeNewOrder } from '../services/dispatch.service';
 import { isOpenNow } from '../lib/open';
 import { notify, notifyAdmins, notifyAssignedLivreur } from '../lib/notify';
@@ -16,7 +16,7 @@ import { mergeSupplementEntries, normalizeDishType } from '../lib/categoryRules'
 import type { Prisma } from '@prisma/client';
 
 /** Recolte {name, price} dans le JSON de catalog d'options d'un produit. */
-function collectCatalogEntries(node: unknown, out: { name: string; price: number }[]): void {
+export function collectCatalogEntries(node: unknown, out: { name: string; price: number }[]): void {
   if (Array.isArray(node)) {
     for (const item of node) collectCatalogEntries(item, out);
     return;
@@ -148,7 +148,7 @@ function collectFreeOptionNames(node: unknown): Set<string> {
 }
 
 /** Supplément en DT : uniquement via le catalog serveur (le prix client est ignore). */
-function optionDelta(catalogOptions: unknown, selectedOptions: unknown): number {
+export function optionDelta(catalogOptions: unknown, selectedOptions: unknown): number {
   if (selectedOptions == null) return 0;
   const freeNames = collectFreeOptionNames(selectedOptions);
   const entries: { name: string; price: number }[] = [];
@@ -184,7 +184,7 @@ function optionDelta(catalogOptions: unknown, selectedOptions: unknown): number 
 }
 
 /** Lit le tableau JSON Product.sizes : [{label, price}] valides uniquement. */
-function parseProductSizes(raw: unknown): { label: string; price: number }[] {
+export function parseProductSizes(raw: unknown): { label: string; price: number }[] {
   if (!Array.isArray(raw)) return [];
   const out: { label: string; price: number }[] = [];
   for (const entry of raw) {
@@ -271,6 +271,8 @@ orderRouter.post(
 
       let restaurantId: string | null = null;
       const shopIds = new Set<string>();
+      // Ordre de pickup = ordre d'apparition dans le panier (premier article = premier commerce).
+      const orderedShopIds: string[] = [];
       let subtotal = 0;
       const orderItems: Prisma.OrderItemUncheckedCreateWithoutOrderInput[] = [];
 
@@ -281,7 +283,10 @@ orderRouter.post(
         // Panier multi-commerces accepte dans UNE commande : le premier commerce
         // du panier est le pickup principal, le livreur enchaine les autres.
         if (!restaurantId) restaurantId = product.restaurant_id;
-        shopIds.add(product.restaurant_id);
+        if (!shopIds.has(product.restaurant_id)) {
+          shopIds.add(product.restaurant_id);
+          orderedShopIds.push(product.restaurant_id);
+        }
 
         const catalog: { name: string; price: number }[] = [];
         collectCatalogEntries(product.options, catalog);
@@ -326,8 +331,22 @@ orderRouter.post(
       if (closedShop) {
         throw ApiError.badRequest(`Commerce ferme actuellement : ${closedShop.name}`, 'RESTAURANT_CLOSED');
       }
-      // Frais : base au premier commerce + supplement par commerce supplementaire.
-      const fee = deliveryFee(shopIds.size);
+      // Frais : fixe de base + 0.5/km sur la course enchainee shop1 -> ...
+      // -> client (+ supplement par commerce supplementaire). Les coordonnées
+      // GPS existent sur toutes les lignes Prisma ; par securite, une valeur
+      // non finie retombe sur le fixe seul.
+      const shopsById = new Map(shops.map((shop) => [shop.id, shop]));
+      const orderedShops = orderedShopIds
+        .map((id) => shopsById.get(id))
+        .filter((shop): shop is (typeof shops)[number] => !!shop);
+      const clientStop: GpsStop = { latitude: address.latitude, longitude: address.longitude };
+      const coordsKnown =
+        [...orderedShops, address].every(
+          (stop) => Number.isFinite(stop.latitude) && Number.isFinite(stop.longitude),
+        ) &&
+        orderedShopIds.length === orderedShops.length;
+      const legsKm = coordsKnown ? pickupLegsKm(orderedShops, clientStop) : null;
+      const fee = deliveryFee(legsKm, Math.max(0, orderedShopIds.length - 1));
 
       return tx.order.create({
         data: {
