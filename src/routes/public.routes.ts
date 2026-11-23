@@ -237,6 +237,7 @@ publicRouter.get(
     const q = req.validated?.query as {
       dish_type?: string;
       flow?: 'epicerie' | 'pharmacie';
+      category?: string;
       medication_category_id?: string;
       restaurant_id?: string;
       q?: string;
@@ -247,6 +248,8 @@ publicRouter.get(
     if (q.restaurant_id) where.restaurant_id = q.restaurant_id;
     if (q.medication_category_id) where.medication_category_id = q.medication_category_id;
     if (q.flow) where.restaurant = { category: q.flow };
+    // Épicerie : chips de catégories (match insensible à la casse).
+    if (q.category) where.category = { equals: q.category, mode: 'insensitive' };
     if (q.q) {
       where.OR = [
         { name: { contains: q.q, mode: 'insensitive' } },
@@ -276,6 +279,25 @@ publicRouter.get(
       orderBy: [{ sort_order: 'asc' }, { created_at: 'asc' }],
       include: { _count: { select: { products: true } } },
     });
+    res.json(categories);
+  }),
+);
+
+/* --------------------- Flux Épicerie → catégories produits (chips client) --------------------- */
+
+publicRouter.get(
+  '/grocery-categories',
+  asyncHandler(async (_req, res) => {
+    // Une seule requête groupBy : catégories distinctes des produits disponibles
+    // des commerces de catégorie épicerie (additif : les vieux clients l'ignorent).
+    const grouped = await prisma.product.groupBy({
+      by: ['category'],
+      where: { is_available: true, restaurant: { category: 'epicerie' } },
+      _count: { _all: true },
+    });
+    const categories = grouped
+      .map((g) => ({ category: g.category, count: g._count._all }))
+      .sort((a, b) => a.category.localeCompare(b.category, 'fr'));
     res.json(categories);
   }),
 );

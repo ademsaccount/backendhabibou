@@ -71,14 +71,23 @@ enum StoryMedia {
   video
 }
 
+/** Origine du compte : mot de passe local ou connexion Google. */
+enum AuthProvider {
+  local
+  google
+}
+
 model User {
   id            String   @id @default(uuid())
   email         String   @unique
   phone         String?
-  password_hash String
+  password_hash String?
   full_name     String
   role          Role     @default(client)
   avatar_url    String?
+  // Identifiant Google stable (payload.sub du jeton ID) — unique par compte.
+  google_id     String?  @unique
+  auth_provider AuthProvider @default(local)
   // Jeton Expo Push (app sudo_habichou) â€” null = notifications push non enregistrees.
   expo_push_token String?
   // Locale du client pour localiser les pushes (fr | en | aeb).

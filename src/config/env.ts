@@ -14,6 +14,17 @@ const EnvSchema = z.object({
   JWT_REFRESH_SECRET: z.string().min(8, 'JWT_REFRESH_SECRET doit faire au moins 8 caracteres'),
   JWT_ACCESS_TTL: z.string().default('15m'),
   JWT_REFRESH_TTL: z.string().default('7d'),
+  /** Connexion Google : Web client ID (audience principale, obligatoire). */
+  GOOGLE_CLIENT_ID: z
+    .string()
+    .default('')
+    .refine(
+      (value) => value.length > 0,
+      'GOOGLE_CLIENT_ID manquant : ajoute le Web client ID Google (voir .env.example)',
+    ),
+  /** Audiences supplementaires acceptees (iOS / Android), optionnelles. */
+  GOOGLE_IOS_CLIENT_ID: z.string().default(''),
+  GOOGLE_ANDROID_CLIENT_ID: z.string().default(''),
   /** Frais fixes par course. */
   DELIVERY_BASE_FEE: z.coerce.number().min(0).default(2),
   /** Frais au kilometre : ligne droite, chaque troncon arrondi au km superieur. */

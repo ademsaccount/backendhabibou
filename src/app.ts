@@ -20,6 +20,10 @@ import { livreurRouter } from './routes/livreur.routes';
 export function createApp() {
   const app = express();
 
+  // Render place l'app derriere un seul proxy : sans ce reglage, req.ip
+  // (rate limiting) et les URLs absolues seraient ceux du proxy.
+  app.set('trust proxy', 1);
+
   app.use(requestLog);
   app.use(helmet());
   app.use(

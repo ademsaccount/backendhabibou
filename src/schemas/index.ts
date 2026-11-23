@@ -28,6 +28,13 @@ export const refreshSchema = z.object({
   body: z.object({ refresh_token: z.string().min(10, 'Refresh token requis') }),
 });
 
+/** Connexion Google native : le client envoie l'ID token obtenu sur l'appareil. */
+export const googleLoginSchema = z.object({
+  body: z.object({
+    idToken: z.string().trim().min(1, 'idToken requis'),
+  }),
+});
+
 export const restaurantsQuery = z.object({
   lat: z.coerce.number().min(-90).max(90).optional(),
   lng: z.coerce.number().min(-180).max(180).optional(),
@@ -46,6 +53,8 @@ export const productsQuery = z.object({
   dish_type: z.string().trim().min(1).optional(),
   // Épicerie : produits des commerces de catégorie épicerie
   flow: z.enum(['epicerie', 'pharmacie']).optional(),
+  // Épicerie : catégorie produit ("Sauces", "Pastas"...) — chips de l'app client
+  category: z.string().trim().min(1).optional(),
   // Pharmacie : produits rattachés à une catégorie de médicaments
   medication_category_id: z.string().trim().min(1).optional(),
   restaurant_id: z.string().trim().min(1).optional(),
