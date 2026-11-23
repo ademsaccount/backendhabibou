@@ -102,6 +102,7 @@ model User {
   livreur       Livreur?
   cart          Cart?
   refresh_tokens RefreshToken[]
+  password_reset_codes PasswordResetCode[]
   restaurants_created Restaurant[] @relation("RestaurantCreatedBy")
   saved_carts     SavedCart[]
 
@@ -113,6 +114,23 @@ model RefreshToken {
   user_id    String
   token_hash String   @unique
   expires_at DateTime
+  created_at DateTime @default(now())
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+}
+
+/**
+ * Code de reinitialisation de mot de passe (6 chiffres, envoye par email).
+ * Seul le hash du code est stocke ; un seul code actif par utilisateur.
+ */
+model PasswordResetCode {
+  id         String   @id @default(uuid())
+  user_id    String
+  code_hash  String
+  expires_at DateTime
+  attempts   Int      @default(0)
   created_at DateTime @default(now())
 
   user User @relation(fields: [user_id], references: [id], onDelete: Cascade)

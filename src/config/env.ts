@@ -25,6 +25,20 @@ const EnvSchema = z.object({
   /** Audiences supplementaires acceptees (iOS / Android), optionnelles. */
   GOOGLE_IOS_CLIENT_ID: z.string().default(''),
   GOOGLE_ANDROID_CLIENT_ID: z.string().default(''),
+  /**
+   * Envoi d'emails (reinitialisation de mot de passe) via l'API HTTP Brevo.
+   * Optionnel : sans configuration, le code n'est renvoye qu'en developpement.
+   * (SMTP inutilisable : Render bloque les ports 25/465/587.)
+   */
+  BREVO_API_KEY: z.string().default(''),
+  /** Expediteur, ex. "no-reply@habichou.tn". */
+  MAIL_FROM_EMAIL: z.string().default(''),
+  /** Nom affiche de l'expediteur. */
+  MAIL_FROM_NAME: z.string().default('Habichou'),
+  /** Duree de vie du code de reinitialisation (minutes). */
+  PASSWORD_RESET_TTL_MIN: z.coerce.number().int().positive().default(15),
+  /** Nombre d'essais autorises avant invalidation du code. */
+  PASSWORD_RESET_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
   /** Frais fixes par course. */
   DELIVERY_BASE_FEE: z.coerce.number().min(0).default(2),
   /** Frais au kilometre : ligne droite, chaque troncon arrondi au km superieur. */

@@ -2,14 +2,31 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import rateLimit from 'express-rate-limit';
 import multer from 'multer';
+import { env, isProd } from '../config/env';
 import { prisma } from '../lib/prisma';
 import { ApiError, asyncHandler } from '../lib/errors';
 import { logger } from '../lib/logger';
 import { requireAuth } from '../middleware/auth';
 import { validate } from '../middleware/validate';
-import { googleLoginSchema, loginSchema, refreshSchema, registerSchema } from '../schemas';
+import {
+  forgotPasswordSchema,
+  googleLoginSchema,
+  loginSchema,
+  refreshSchema,
+  registerSchema,
+  resetPasswordSchema,
+} from '../schemas';
 import { sha256, signAccessToken, signRefreshToken, verifyRefreshToken } from '../lib/jwt';
 import { verifyGoogleIdToken } from '../lib/google';
+import { isMailConfigured, sendPasswordResetCode } from '../lib/mailer';
+import {
+  RESET_RESEND_COOLDOWN_MS,
+  generateResetCode,
+  hashResetCode,
+  isResetCodeExpired,
+  resetCodeExpiry,
+  sameHash,
+} from '../lib/passwordReset';
 import { toSafeUser } from '../lib/user';
 import { uploadBuffer } from '../lib/upload';
 
@@ -33,6 +50,37 @@ const googleRateLimit = rateLimit({
   },
 });
 
+/**
+ * Mot de passe oublie : limite les envois d'emails par IP (anti-spam) et la
+ * verification des codes (anti brute-force). Le cooldown par compte est gere
+ * dans le handler.
+ */
+const forgotPasswordRateLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: {
+    error: {
+      code: 'TOO_MANY_REQUESTS',
+      message: 'Trop de demandes de reinitialisation. Reessayez dans quelques minutes.',
+    },
+  },
+});
+
+const resetPasswordRateLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: {
+    error: {
+      code: 'TOO_MANY_REQUESTS',
+      message: 'Trop de tentatives. Reessayez dans quelques minutes.',
+    },
+  },
+});
+
 // Avatar optionnel en multipart (photo choisie dans l'app à l'inscription).
 // Multer ignore les requêtes JSON (Content-Type non multipart), donc les
 // anciens clients JSON continuent de fonctionner à l'identique.
@@ -52,6 +100,20 @@ async function issueTokens(userId: string, role: 'client' | 'admin' | 'livreur')
     },
   });
   return { access_token: access, refresh_token: refresh };
+}
+
+/** Remplace tout code existant : un seul code actif par utilisateur. */
+async function storeResetCode(userId: string, code: string): Promise<void> {
+  await prisma.$transaction([
+    prisma.passwordResetCode.deleteMany({ where: { user_id: userId } }),
+    prisma.passwordResetCode.create({
+      data: {
+        user_id: userId,
+        code_hash: hashResetCode(code),
+        expires_at: resetCodeExpiry(),
+      },
+    }),
+  ]);
 }
 
 router.post(
@@ -201,6 +263,130 @@ router.post(
     // Meme contrat que /login : access + refresh JWT + user safe.
     const tokens = await issueTokens(user.id, user.role);
     res.json({ ...tokens, user: toSafeUser(user) });
+  }),
+);
+
+/**
+ * Mot de passe oublie, etape 1 : envoi d'un code a 6 chiffres par email.
+ *
+ * Anti-enumeration : la reponse est TOUJOURS 200 `{ ok: true }`, que le compte
+ * existe ou non (et meme pendant le cooldown). En developpement, si Brevo n'est
+ * pas configure (ou echoue), le code est renvoye dans `dev_code` (jamais en
+ * production, jamais journalise).
+ */
+router.post(
+  '/forgot-password',
+  forgotPasswordRateLimit,
+  validate(forgotPasswordSchema),
+  asyncHandler(async (req, res) => {
+    const { email } = req.body as { email: string };
+    const ok = { ok: true as const };
+
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) return res.json(ok);
+
+    // Cooldown par compte : ne pas renvoyer un code a chaque clic.
+    const last = await prisma.passwordResetCode.findFirst({
+      where: { user_id: user.id },
+      orderBy: { created_at: 'desc' },
+    });
+    if (last && Date.now() - last.created_at.getTime() < RESET_RESEND_COOLDOWN_MS) {
+      return res.json(ok);
+    }
+
+    const code = generateResetCode();
+    await storeResetCode(user.id, code);
+
+    if (!isMailConfigured()) {
+      if (isProd) {
+        throw new ApiError(503, 'MAIL_UNAVAILABLE', "L'envoi d'email n'est pas configure");
+      }
+      logger.warn(
+        'mail',
+        `Brevo non configure : code de reinitialisation (dev) user=${user.id}`,
+      );
+      return res.json({ ...ok, dev_code: code });
+    }
+
+    try {
+      await sendPasswordResetCode(user.email, code, user.locale);
+    } catch (error) {
+      logger.error(
+        'mail',
+        "echec de l'envoi du code de reinitialisation",
+        error instanceof Error ? error : String(error),
+      );
+      if (isProd) {
+        throw new ApiError(503, 'MAIL_UNAVAILABLE', "Impossible d'envoyer l'email pour le moment");
+      }
+      // Dev : Brevo mal configure -> on donne le code pour ne pas bloquer.
+      logger.warn('mail', `fallback dev : code de reinitialisation user=${user.id}`);
+      return res.json({ ...ok, dev_code: code });
+    }
+
+    return res.json(ok);
+  }),
+);
+
+/**
+ * Mot de passe oublie, etape 2 : verification du code + nouveau mot de passe.
+ *
+ * - code hashe en base, expire apres PASSWORD_RESET_TTL_MIN, 5 essais max ;
+ * - toutes les sessions (refresh tokens) sont invalidees apres le reset ;
+ * - un compte Google-only peut definir un mot de passe de cette facon.
+ */
+router.post(
+  '/reset-password',
+  resetPasswordRateLimit,
+  validate(resetPasswordSchema),
+  asyncHandler(async (req, res) => {
+    const { email, code, password } = req.body as {
+      email: string;
+      code: string;
+      password: string;
+    };
+
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) throw ApiError.badRequest('Code invalide ou expire', 'INVALID_RESET_CODE');
+
+    const record = await prisma.passwordResetCode.findFirst({
+      where: { user_id: user.id },
+      orderBy: { created_at: 'desc' },
+    });
+
+    if (
+      !record ||
+      isResetCodeExpired(record.expires_at) ||
+      record.attempts >= env.PASSWORD_RESET_MAX_ATTEMPTS ||
+      !sameHash(record.code_hash, hashResetCode(code))
+    ) {
+      if (record) {
+        if (
+          isResetCodeExpired(record.expires_at) ||
+          record.attempts + 1 >= env.PASSWORD_RESET_MAX_ATTEMPTS
+        ) {
+          await prisma.passwordResetCode
+            .delete({ where: { id: record.id } })
+            .catch(() => undefined);
+        } else {
+          await prisma.passwordResetCode
+            .update({ where: { id: record.id }, data: { attempts: { increment: 1 } } })
+            .catch(() => undefined);
+        }
+      }
+      throw ApiError.badRequest('Code invalide ou expire', 'INVALID_RESET_CODE');
+    }
+
+    const password_hash = await bcrypt.hash(password, 10);
+    await prisma.$transaction([
+      prisma.user.update({ where: { id: user.id }, data: { password_hash } }),
+      prisma.passwordResetCode.deleteMany({ where: { user_id: user.id } }),
+      // Deconnexion de tous les appareils apres un changement de mot de passe.
+      prisma.refreshToken.deleteMany({ where: { user_id: user.id } }),
+    ]);
+
+    logger.info('auth', `password reset user=${user.id}`);
+    return res.json({ ok: true });
   }),
 );
 

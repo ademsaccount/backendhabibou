@@ -35,6 +35,22 @@ export const googleLoginSchema = z.object({
   }),
 });
 
+/** Mot de passe oublie : envoi d'un code a 6 chiffres par email. */
+export const forgotPasswordSchema = z.object({
+  body: z.object({
+    email: z.string().trim().toLowerCase().regex(emailRe, 'Email invalide'),
+  }),
+});
+
+/** Reinitialisation : email + code recu + nouveau mot de passe. */
+export const resetPasswordSchema = z.object({
+  body: z.object({
+    email: z.string().trim().toLowerCase().regex(emailRe, 'Email invalide'),
+    code: z.string().trim().regex(/^\d{6}$/, 'Code a 6 chiffres requis'),
+    password: z.string().min(8, 'Mot de passe : 8 caracteres minimum'),
+  }),
+});
+
 export const restaurantsQuery = z.object({
   lat: z.coerce.number().min(-90).max(90).optional(),
   lng: z.coerce.number().min(-180).max(180).optional(),

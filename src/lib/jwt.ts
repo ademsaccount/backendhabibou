@@ -16,7 +16,10 @@ export function signAccessToken(user: Pick<User, 'id' | 'role'>): string {
 }
 
 export function signRefreshToken(user: Pick<User, 'id' | 'role'>): string {
-  const payload = { sub: user.id, role: user.role, type: 'refresh' };
+  // `jti` aleatoire : sans lui, deux logins dans la meme seconde produisent un
+  // JWT strictement identique (meme iat) -> meme hash -> violation de la
+  // contrainte unique `RefreshToken.token_hash` (409 ALREADY_EXISTS).
+  const payload = { sub: user.id, role: user.role, type: 'refresh', jti: crypto.randomUUID() };
   return jwt.sign(payload, env.JWT_REFRESH_SECRET, { expiresIn: env.JWT_REFRESH_TTL } as SignOptions);
 }
 
