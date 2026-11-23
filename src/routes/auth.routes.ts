@@ -14,18 +14,21 @@ import {
   loginSchema,
   refreshSchema,
   registerSchema,
+  resendVerificationSchema,
   resetPasswordSchema,
+  verifyEmailSchema,
 } from '../schemas';
 import { sha256, signAccessToken, signRefreshToken, verifyRefreshToken } from '../lib/jwt';
 import { verifyGoogleIdToken } from '../lib/google';
-import { isMailConfigured, sendPasswordResetCode } from '../lib/mailer';
+import { isMailConfigured, sendEmailVerificationCode, sendPasswordResetCode } from '../lib/mailer';
 import {
-  RESET_RESEND_COOLDOWN_MS,
-  generateResetCode,
+  RESEND_COOLDOWN_MS,
+  generateCode,
   hashResetCode,
-  isResetCodeExpired,
+  hashVerificationCode,
   resetCodeExpiry,
-  sameHash,
+  verifyStoredCode,
+  verificationCodeExpiry,
 } from '../lib/passwordReset';
 import { toSafeUser } from '../lib/user';
 import { uploadBuffer } from '../lib/upload';
@@ -81,6 +84,34 @@ const resetPasswordRateLimit = rateLimit({
   },
 });
 
+/** Verification d'email : limite les essais de code par IP (anti brute-force). */
+const verifyEmailRateLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: {
+    error: {
+      code: 'TOO_MANY_REQUESTS',
+      message: 'Trop de tentatives. Reessayez dans quelques minutes.',
+    },
+  },
+});
+
+/** Renvoi d'un code de verification : limite les envois d'emails par IP. */
+const resendVerificationRateLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: {
+    error: {
+      code: 'TOO_MANY_REQUESTS',
+      message: 'Trop de demandes de verification. Reessayez dans quelques minutes.',
+    },
+  },
+});
+
 // Avatar optionnel en multipart (photo choisie dans l'app à l'inscription).
 // Multer ignore les requêtes JSON (Content-Type non multipart), donc les
 // anciens clients JSON continuent de fonctionner à l'identique.
@@ -116,6 +147,85 @@ async function storeResetCode(userId: string, code: string): Promise<void> {
   ]);
 }
 
+/** Un seul code de verification actif : purge aussi les codes consommes. */
+async function storeVerificationCode(userId: string, code: string): Promise<void> {
+  await prisma.$transaction([
+    prisma.emailVerificationCode.deleteMany({ where: { user_id: userId } }),
+    prisma.emailVerificationCode.create({
+      data: {
+        user_id: userId,
+        code_hash: hashVerificationCode(code),
+        expires_at: verificationCodeExpiry(),
+      },
+    }),
+  ]);
+}
+
+type SendVerificationResult =
+  | { status: 'sent'; dev_code?: string }
+  | { status: 'throttled' }
+  | { status: 'failed' };
+
+/**
+ * Genere, stocke et envoie un code de verification d'email.
+ *
+ * - cooldown par compte (RESEND_COOLDOWN_MS) si `respectCooldown` ;
+ * - un seul code actif : les anciens (y compris consommes) sont supprimes ;
+ * - dev sans Brevo : le code est retourne comme `dev_code` (jamais en prod) ;
+ * - echec d'envoi : le code inutilisable est supprime (pour ne pas bloquer le
+ *   prochain envoi par le cooldown) et `failed` est retourne — l'appelant
+ *   decide (503 sur /register, 200 silencieux sur /resend-verification,
+ *   best effort sur /login). Ne leve jamais.
+ *
+ * Le code en clair n'est jamais journalise.
+ */
+async function sendVerificationCode(
+  user: { id: string; email: string; locale: string | null },
+  respectCooldown = true,
+): Promise<SendVerificationResult> {
+  if (respectCooldown) {
+    const last = await prisma.emailVerificationCode.findFirst({
+      where: { user_id: user.id },
+      orderBy: { created_at: 'desc' },
+    });
+    if (last && Date.now() - last.created_at.getTime() < RESEND_COOLDOWN_MS) {
+      return { status: 'throttled' };
+    }
+  }
+
+  const code = generateCode();
+
+  if (!isMailConfigured()) {
+    if (isProd) {
+      logger.warn('mail', 'Brevo non configure (prod) : code de verification non envoye');
+      return { status: 'failed' };
+    }
+    await storeVerificationCode(user.id, code);
+    logger.warn('mail', `Brevo non configure : code de verification (dev) user=${user.id}`);
+    return { status: 'sent', dev_code: code };
+  }
+
+  await storeVerificationCode(user.id, code);
+  try {
+    await sendEmailVerificationCode(user.email, code, user.locale);
+    return { status: 'sent' };
+  } catch (error) {
+    logger.error(
+      'mail',
+      "echec de l'envoi du code de verification",
+      error instanceof Error ? error : String(error),
+    );
+    if (isProd) {
+      await prisma.emailVerificationCode
+        .deleteMany({ where: { user_id: user.id } })
+        .catch(() => undefined);
+      return { status: 'failed' };
+    }
+    // Dev : Brevo mal configure -> on donne le code pour ne pas bloquer.
+    return { status: 'sent', dev_code: code };
+  }
+}
+
 router.post(
   '/register',
   registerUpload.single('avatar'),
@@ -123,7 +233,35 @@ router.post(
   asyncHandler(async (req, res) => {
     const { email, password, full_name, phone, role } = req.body;
     const existing = await prisma.user.findUnique({ where: { email } });
-    if (existing) throw ApiError.conflict('Un compte existe deja avec cet email', 'EMAIL_TAKEN');
+
+    // Deja verifie : 409 historique, aucune autre information ne fuit.
+    if (existing?.email_verified_at) {
+      throw ApiError.conflict('Un compte existe deja avec cet email', 'EMAIL_TAKEN');
+    }
+
+    // Inscription abandonnee (compte non verifie) : on reprend le compte avec
+    // les nouvelles donnees et on renvoie exactement comme un nouveau signup.
+    if (existing) {
+      await prisma.user.update({
+        where: { id: existing.id },
+        data: {
+          full_name,
+          password_hash: await bcrypt.hash(password, 10),
+        },
+      });
+      const send = await sendVerificationCode(existing);
+      if (send.status === 'failed') {
+        // L'utilisateur est conserve (non verifie) : l'app pourra proposer
+        // un renvoi via /auth/resend-verification.
+        throw new ApiError(503, 'MAIL_UNAVAILABLE', "Impossible d'envoyer l'email pour le moment");
+      }
+      res.status(201).json({
+        needs_verification: true,
+        email,
+        ...(send.status === 'sent' && send.dev_code ? { dev_code: send.dev_code } : {}),
+      });
+      return;
+    }
 
     // Photo d'avatar optionnelle (champ "avatar" du FormData) : upload AVANT
     // la création du compte — si le stockage échoue, aucun utilisateur n'est
@@ -148,14 +286,27 @@ router.post(
         phone: phone ?? null,
         role: role ?? 'client',
         avatar_url,
+        // Non verifie tant que le code n'a pas ete valide.
+        email_verified_at: null,
         // --- DÉSACTIVÉ : plus de compte livreur (l'admin fait office de livreur unique) ---
         // ...(role === 'livreur' ? { livreur: { create: {} } } : {}),
         // --- FIN DÉSACTIVÉ ---
       },
     });
 
-    const tokens = await issueTokens(user.id, user.role);
-    res.status(201).json({ ...tokens, user: toSafeUser(user) });
+    const send = await sendVerificationCode(user);
+    if (send.status === 'failed') {
+      // L'utilisateur est conserve (non verifie) : pas de token, l'app
+      // pourra proposer un renvoi via /auth/resend-verification.
+      throw new ApiError(503, 'MAIL_UNAVAILABLE', "Impossible d'envoyer l'email pour le moment");
+    }
+
+    // Pas de token ici : le compte devient utilisable apres /auth/verify-email.
+    res.status(201).json({
+      needs_verification: true,
+      email,
+      ...(send.status === 'sent' && send.dev_code ? { dev_code: send.dev_code } : {}),
+    });
   }),
 );
 
@@ -175,6 +326,20 @@ router.post(
     }
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) throw ApiError.unauthorized('Email ou mot de passe incorrect', 'INVALID_CREDENTIALS');
+
+    // Email non verifie : aucun token. Le mot de passe est deja controle, ce
+    // 403 ne revele donc pas l'existence du compte a un inconnu. On tente un
+    // envoi (cooldown permet) pour que l'app bascule sur l'ecran de code.
+    if (!user.email_verified_at) {
+      const send = await sendVerificationCode(user).catch(() => ({ status: 'failed' as const }));
+      throw new ApiError(
+        403,
+        'EMAIL_NOT_VERIFIED',
+        'Veuillez verifier votre email avant de vous connecter',
+        // Uniquement en dev sans Brevo : sert de fallback `dev_code` a l'app.
+        send.status === 'sent' && send.dev_code ? { dev_code: send.dev_code } : undefined,
+      );
+    }
 
     if (user.role === 'livreur') {
       await prisma.livreur.upsert({ where: { user_id: user.id }, update: {}, create: { user_id: user.id } });
@@ -239,7 +404,12 @@ router.post(
         }
         user = await prisma.user.update({
           where: { id: byEmail.id },
-          data: { google_id: payload.sub },
+          data: {
+            google_id: payload.sub,
+            // Le compte prouve la possession de l'email via Google : on le
+            // marque verifie s'il ne l'etait pas (inscription locale inachevee).
+            ...(byEmail.email_verified_at ? {} : { email_verified_at: new Date() }),
+          },
         });
         outcome = 'linked';
       } else {
@@ -252,10 +422,20 @@ router.post(
             avatar_url: payload.picture ?? null,
             google_id: payload.sub,
             auth_provider: 'google',
+            // Google a confirme email_verified === true (controle ci-dessus).
+            email_verified_at: new Date(),
           },
         });
         outcome = 'created';
       }
+    }
+
+    // Compte Google cree avant la colonne : on le verifie maintenant.
+    if (!user.email_verified_at) {
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: { email_verified_at: new Date() },
+      });
     }
 
     logger.info('auth', `google sign-in ${outcome} user=${user.id}`);
@@ -263,6 +443,97 @@ router.post(
     // Meme contrat que /login : access + refresh JWT + user safe.
     const tokens = await issueTokens(user.id, user.role);
     res.json({ ...tokens, user: toSafeUser(user) });
+  }),
+);
+
+/**
+ * Verification de l'email, etape 2 : validation du code + connexion.
+ *
+ * - code hashe en base, expire apres EMAIL_VERIFICATION_TTL_MIN, essais max ;
+ * - usage unique (consumed_at) : un code deja valide ne peut plus servir ;
+ * - reponse identique a /login pour connecter l'app directement.
+ */
+router.post(
+  '/verify-email',
+  verifyEmailRateLimit,
+  validate(verifyEmailSchema),
+  asyncHandler(async (req, res) => {
+    const { email, code } = req.body as { email: string; code: string };
+
+    const user = await prisma.user.findUnique({ where: { email } });
+    const record = user
+      ? await prisma.emailVerificationCode.findFirst({
+          where: { user_id: user.id },
+          orderBy: { created_at: 'desc' },
+        })
+      : null;
+
+    // Meme message dans tous les cas (inconnu / sans code / expire / consomme
+    // / epuise / faux code) : aucun detail ne doit fuiter.
+    if (!user || !record) {
+      throw ApiError.badRequest('Code invalide ou expire', 'INVALID_VERIFICATION_CODE');
+    }
+
+    const valid = await verifyStoredCode({
+      record,
+      enteredHash: hashVerificationCode(code),
+      maxAttempts: env.EMAIL_VERIFICATION_MAX_ATTEMPTS,
+      consumed: record.consumed_at !== null,
+      destroy: () => prisma.emailVerificationCode.delete({ where: { id: record.id } }),
+      addAttempt: () =>
+        prisma.emailVerificationCode.update({
+          where: { id: record.id },
+          data: { attempts: { increment: 1 } },
+        }),
+    });
+    if (!valid) {
+      throw ApiError.badRequest('Code invalide ou expire', 'INVALID_VERIFICATION_CODE');
+    }
+
+    const verifiedAt = new Date();
+    await prisma.$transaction([
+      prisma.user.update({ where: { id: user.id }, data: { email_verified_at: verifiedAt } }),
+      prisma.emailVerificationCode.update({
+        where: { id: record.id },
+        data: { consumed_at: verifiedAt },
+      }),
+    ]);
+    // Reflete la verification dans la reponse (l objet `user` est anterieur).
+    user.email_verified_at = verifiedAt;
+
+    if (user.role === 'livreur') {
+      await prisma.livreur.upsert({ where: { user_id: user.id }, update: {}, create: { user_id: user.id } });
+    }
+
+    // Meme contrat que /login : l'app connecte l'utilisateur directement.
+    const tokens = await issueTokens(user.id, user.role);
+    logger.info('auth', `email verified user=${user.id}`);
+    res.json({ ...tokens, user: toSafeUser(user) });
+  }),
+);
+
+/**
+ * Renvoi d'un code de verification.
+ *
+ * Anti-enumeration : reponse TOUJOURS 200 `{ ok: true }` (compte inconnu,
+ * deja verifie ou cooldown). Le code n'est envoye que si le compte existe et
+ * n'est pas verifie ; un echec d'envoi ne change pas la reponse. En dev sans
+ * Brevo, `dev_code` est renvoye (jamais en production).
+ */
+router.post(
+  '/resend-verification',
+  resendVerificationRateLimit,
+  validate(resendVerificationSchema),
+  asyncHandler(async (req, res) => {
+    const { email } = req.body as { email: string };
+    const ok = { ok: true as const };
+
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user || user.email_verified_at) return res.json(ok);
+
+    const send = await sendVerificationCode(user);
+    if (send.status === 'failed') return res.json(ok);
+    return res.json(send.status === 'sent' && send.dev_code ? { ...ok, dev_code: send.dev_code } : ok);
   }),
 );
 
@@ -290,11 +561,11 @@ router.post(
       where: { user_id: user.id },
       orderBy: { created_at: 'desc' },
     });
-    if (last && Date.now() - last.created_at.getTime() < RESET_RESEND_COOLDOWN_MS) {
+    if (last && Date.now() - last.created_at.getTime() < RESEND_COOLDOWN_MS) {
       return res.json(ok);
     }
 
-    const code = generateResetCode();
+    const code = generateCode();
     await storeResetCode(user.id, code);
 
     if (!isMailConfigured()) {
@@ -353,33 +624,32 @@ router.post(
       where: { user_id: user.id },
       orderBy: { created_at: 'desc' },
     });
+    if (!record) throw ApiError.badRequest('Code invalide ou expire', 'INVALID_RESET_CODE');
 
-    if (
-      !record ||
-      isResetCodeExpired(record.expires_at) ||
-      record.attempts >= env.PASSWORD_RESET_MAX_ATTEMPTS ||
-      !sameHash(record.code_hash, hashResetCode(code))
-    ) {
-      if (record) {
-        if (
-          isResetCodeExpired(record.expires_at) ||
-          record.attempts + 1 >= env.PASSWORD_RESET_MAX_ATTEMPTS
-        ) {
-          await prisma.passwordResetCode
-            .delete({ where: { id: record.id } })
-            .catch(() => undefined);
-        } else {
-          await prisma.passwordResetCode
-            .update({ where: { id: record.id }, data: { attempts: { increment: 1 } } })
-            .catch(() => undefined);
-        }
-      }
-      throw ApiError.badRequest('Code invalide ou expire', 'INVALID_RESET_CODE');
-    }
+    const valid = await verifyStoredCode({
+      record,
+      enteredHash: hashResetCode(code),
+      maxAttempts: env.PASSWORD_RESET_MAX_ATTEMPTS,
+      destroy: () => prisma.passwordResetCode.delete({ where: { id: record.id } }),
+      addAttempt: () =>
+        prisma.passwordResetCode.update({
+          where: { id: record.id },
+          data: { attempts: { increment: 1 } },
+        }),
+    });
+    if (!valid) throw ApiError.badRequest('Code invalide ou expire', 'INVALID_RESET_CODE');
 
     const password_hash = await bcrypt.hash(password, 10);
     await prisma.$transaction([
-      prisma.user.update({ where: { id: user.id }, data: { password_hash } }),
+      prisma.user.update({
+        where: { id: user.id },
+        data: {
+          password_hash,
+          // Le possesseur de la boite mail a prouve sa propriete : on verifie
+          // l'email s'il ne l'etait pas (compte non verifie avant le reset).
+          ...(user.email_verified_at ? {} : { email_verified_at: new Date() }),
+        },
+      }),
       prisma.passwordResetCode.deleteMany({ where: { user_id: user.id } }),
       // Deconnexion de tous les appareils apres un changement de mot de passe.
       prisma.refreshToken.deleteMany({ where: { user_id: user.id } }),
@@ -404,6 +674,10 @@ router.post(
 
     const user = await prisma.user.findUnique({ where: { id: payload.sub } });
     if (!user) throw ApiError.unauthorized('Utilisateur introuvable', 'USER_NOT_FOUND');
+    // Aucun nouveau token pour un compte dont l'email n'a pas ete verifie.
+    if (!user.email_verified_at) {
+      throw ApiError.forbidden('Email non verifie', 'EMAIL_NOT_VERIFIED');
+    }
 
     // Rotation : l'ancien refresh est consomme
     await prisma.refreshToken.delete({ where: { token_hash: hash } }).catch(() => undefined);

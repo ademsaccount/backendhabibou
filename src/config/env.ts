@@ -39,6 +39,10 @@ const EnvSchema = z.object({
   PASSWORD_RESET_TTL_MIN: z.coerce.number().int().positive().default(15),
   /** Nombre d'essais autorises avant invalidation du code. */
   PASSWORD_RESET_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
+  /** Duree de vie du code de verification d'email (minutes). */
+  EMAIL_VERIFICATION_TTL_MIN: z.coerce.number().int().positive().default(15),
+  /** Nombre d'essais autorises avant invalidation du code de verification. */
+  EMAIL_VERIFICATION_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
   /** Frais fixes par course. */
   DELIVERY_BASE_FEE: z.coerce.number().min(0).default(2),
   /** Frais au kilometre : ligne droite, chaque troncon arrondi au km superieur. */

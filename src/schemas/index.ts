@@ -51,6 +51,21 @@ export const resetPasswordSchema = z.object({
   }),
 });
 
+/** Verification de l'email a l'inscription : email + code recu. */
+export const verifyEmailSchema = z.object({
+  body: z.object({
+    email: z.string().trim().toLowerCase().regex(emailRe, 'Email invalide'),
+    code: z.string().trim().regex(/^\d{6}$/, 'Code a 6 chiffres requis'),
+  }),
+});
+
+/** Renvoi d'un code de verification (toujours 200, anti-enumeration). */
+export const resendVerificationSchema = z.object({
+  body: z.object({
+    email: z.string().trim().toLowerCase().regex(emailRe, 'Email invalide'),
+  }),
+});
+
 export const restaurantsQuery = z.object({
   lat: z.coerce.number().min(-90).max(90).optional(),
   lng: z.coerce.number().min(-180).max(180).optional(),

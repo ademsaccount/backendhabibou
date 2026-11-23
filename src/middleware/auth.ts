@@ -11,6 +11,11 @@ export async function requireAuth(req: Request, _res: Response, next: NextFuncti
     const payload = verifyAccessToken(token);
     const user = await prisma.user.findUnique({ where: { id: payload.sub } });
     if (!user) throw ApiError.unauthorized('Utilisateur introuvable', 'USER_NOT_FOUND');
+    // Compte non verifie : aucun acces (les comptes existants sont verifies
+    // par la migration, donc personne n'est bloque inopinement).
+    if (!user.email_verified_at) {
+      throw ApiError.forbidden('Email non verifie', 'EMAIL_NOT_VERIFIED');
+    }
     req.user = toSafeUser(user);
     req.authPayload = { sub: user.id, role: user.role };
     next();

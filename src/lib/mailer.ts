@@ -8,9 +8,12 @@ import { logger } from './logger';
  * L'API HTTP remplace SMTP : les services Render (plan gratuit) bloquent les
  * ports sortants 25/465/587. Aucune dependance externe (fetch natif).
  *
- * La configuration est optionnelle : si elle est absente, les routes de
- * reinitialisation renvoient le code uniquement en developpement (jamais en
- * production). Aucune cle API, aucun code ni mot de passe n'est journalise.
+ * Deux emails partagent le meme gabarit « code a 6 chiffres » :
+ * reinitialisation de mot de passe et verification d'inscription.
+ *
+ * La configuration est optionnelle : si elle est absente, les routes
+ * renvoient le code uniquement en developpement (jamais en production).
+ * Aucune cle API, aucun code ni mot de passe n'est journalise.
  */
 
 const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
@@ -28,7 +31,7 @@ type MailCopy = {
   signature: string;
 };
 
-const COPY: Record<MailLocale, MailCopy> = {
+const COPY_RESET: Record<MailLocale, MailCopy> = {
   fr: {
     subject: 'Habichou — Code de réinitialisation',
     intro: 'Voici ton code pour réinitialiser ton mot de passe Habichou :',
@@ -49,6 +52,33 @@ const COPY: Record<MailLocale, MailCopy> = {
     subject: 'Habichou — كود تعويض كلمة السرّ',
     intro: 'هذا هو الكود باش تعوّض كلمة السرّ متاع Habichou:',
     codeLabel: 'كود التعويض',
+    expiry: (minutes) => `الكود هذا ينتهي بعد ${minutes} دقيقة.`,
+    ignore: 'إذا ما طلبتش هذا، تجاهل الإيميل هذا برك.',
+    signature: 'فريق Habichou',
+  },
+};
+
+const COPY_VERIFY: Record<MailLocale, MailCopy> = {
+  fr: {
+    subject: 'Habichou — Code de vérification',
+    intro: 'Voici ton code pour vérifier ton adresse email Habichou :',
+    codeLabel: 'Code de vérification',
+    expiry: (minutes) => `Ce code expire dans ${minutes} minutes.`,
+    ignore: "Si tu n'es pas à l'origine de cette demande, ignore simplement cet email.",
+    signature: "L'équipe Habichou",
+  },
+  en: {
+    subject: 'Habichou — Verification code',
+    intro: 'Here is your code to verify your Habichou email address:',
+    codeLabel: 'Verification code',
+    expiry: (minutes) => `This code expires in ${minutes} minutes.`,
+    ignore: "If you didn't request this, you can safely ignore this email.",
+    signature: 'The Habichou team',
+  },
+  aeb: {
+    subject: 'Habichou — كود تأكيد الإيميل',
+    intro: 'هذا هو الكود باش تأكّد من الإيميل متاعك في Habichou:',
+    codeLabel: 'كود التأكيد',
     expiry: (minutes) => `الكود هذا ينتهي بعد ${minutes} دقيقة.`,
     ignore: 'إذا ما طلبتش هذا، تجاهل الإيميل هذا برك.',
     signature: 'فريق Habichou',
@@ -85,20 +115,12 @@ function brevoErrorMessage(status: number, body: unknown): string {
   return detail ? `brevo ${status}: ${detail}` : `brevo ${status}`;
 }
 
-/**
- * Envoie le code de reinitialisation. Le code n'apparait que dans l'email :
- * ni dans les logs, ni dans la reponse HTTP (sauf fallback dev sans Brevo).
- *
- * Lance une erreur si l'API Brevo renvoie un statut hors 2xx ou si la requete
- * echoue / depasse le delai : l'appelant transforme cela en MAIL_UNAVAILABLE.
- */
-export async function sendPasswordResetCode(
-  to: string,
+/** Gabarit commun des emails « code a 6 chiffres » (HTML + texte brut). */
+function renderCodeEmail(
+  copy: MailCopy,
   code: string,
-  locale?: string | null,
-): Promise<void> {
-  const copy = COPY[normalizeLocale(locale)];
-  const minutes = env.PASSWORD_RESET_TTL_MIN;
+  minutes: number,
+): { subject: string; textContent: string; htmlContent: string } {
   const safeCode = escapeHtml(code);
 
   const textContent = [
@@ -126,6 +148,21 @@ export async function sendPasswordResetCode(
     </div>
   `;
 
+  return { subject: copy.subject, textContent, htmlContent };
+}
+
+/**
+ * POST vers l'API Brevo. Lance une erreur si le statut est hors 2xx ou si la
+ * requete echoue / depasse le delai : l'appelant transforme cela en
+ * MAIL_UNAVAILABLE (ou en fallback dev). Journalise le statut et le message
+ * d'erreur Brevo — jamais la cle, jamais le code.
+ */
+async function sendBrevoMail(opts: {
+  to: string;
+  subject: string;
+  textContent: string;
+  htmlContent: string;
+}): Promise<void> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
 
@@ -139,10 +176,10 @@ export async function sendPasswordResetCode(
       },
       body: JSON.stringify({
         sender: { name: env.MAIL_FROM_NAME, email: env.MAIL_FROM_EMAIL },
-        to: [{ email: to }],
-        subject: copy.subject,
-        htmlContent,
-        textContent,
+        to: [{ email: opts.to }],
+        subject: opts.subject,
+        htmlContent: opts.htmlContent,
+        textContent: opts.textContent,
       }),
       signal: controller.signal,
     });
@@ -158,14 +195,14 @@ export async function sendPasswordResetCode(
 
     if (!response.ok) {
       const detail = brevoErrorMessage(response.status, body);
-      logger.error('mail', `echec de l'envoi du code de reinitialisation ${detail}`);
+      logger.error('mail', `echec d'envoi ${detail}`);
       throw new Error(detail);
     }
 
-    logger.info('mail', `password reset email sent status=${response.status}`);
+    logger.info('mail', `email sent status=${response.status}`);
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
-      logger.error('mail', `echec de l'envoi du code de reinitialisation timeout=${SEND_TIMEOUT_MS}ms`);
+      logger.error('mail', `echec d'envoi timeout=${SEND_TIMEOUT_MS}ms`);
       throw new Error(`brevo timeout apres ${SEND_TIMEOUT_MS}ms`);
     }
     // Relance telle quelle (le message ne contient jamais la cle ni le code).
@@ -173,4 +210,34 @@ export async function sendPasswordResetCode(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Envoie le code de reinitialisation. Le code n'apparait que dans l'email :
+ * ni dans les logs, ni dans la reponse HTTP (sauf fallback dev sans Brevo).
+ */
+export async function sendPasswordResetCode(
+  to: string,
+  code: string,
+  locale?: string | null,
+): Promise<void> {
+  const mail = renderCodeEmail(COPY_RESET[normalizeLocale(locale)], code, env.PASSWORD_RESET_TTL_MIN);
+  await sendBrevoMail({ to, ...mail });
+}
+
+/**
+ * Envoie le code de verification d'inscription. Meme regles que le
+ * reinitialisation : le code n'apparait que dans l'email.
+ */
+export async function sendEmailVerificationCode(
+  to: string,
+  code: string,
+  locale?: string | null,
+): Promise<void> {
+  const mail = renderCodeEmail(
+    COPY_VERIFY[normalizeLocale(locale)],
+    code,
+    env.EMAIL_VERIFICATION_TTL_MIN,
+  );
+  await sendBrevoMail({ to, ...mail });
 }
