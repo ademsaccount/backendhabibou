@@ -540,6 +540,40 @@ export const updateMedicationCategorySchema = z.object({
   body: createMedicationCategorySchema.shape.body.partial(),
 });
 
+/* ------------- Categorisation specialites (ecran Restaurants client, admin) ------------- */
+
+// slug = cle STABLE identique aux identifiants historiques de l'app
+// (fast_food, burger, pizza, plats) : ne jamais en changer une fois publie.
+export const createCategorySchema = z.object({
+  body: z.object({
+    slug: z
+      .string()
+      .trim()
+      .min(2)
+      .max(40)
+      .regex(/^[a-z0-9_]+$/, 'slug : minuscules, chiffres et underscores uniquement (a-z 0-9 _)'),
+    name_fr: z.string().trim().min(1).max(60),
+    name_en: z.string().trim().min(1).max(60),
+    name_aeb: z.string().trim().min(1).max(60),
+    position: z.coerce.number().int().min(0).optional(),
+    is_active: z.boolean().optional(),
+    /** Lien vers la bibliotheque de medias ; null = delier (GIF retire). */
+    media_asset_id: z.string().min(1).nullable().optional(),
+  }),
+});
+
+export const updateCategorySchema = z.object({
+  params: idParam,
+  body: createCategorySchema.shape.body.partial(),
+});
+
+/** Reordonnancement complet : liste des ids dans l'ordre d'affichage. */
+export const reorderCategoriesSchema = z.object({
+  body: z.object({
+    ids: z.array(z.string().trim().min(1)).min(1).max(200),
+  }),
+});
+
 /** Édition d'un livreur par l'admin top (profil + véhicule + activation). */
 export const updateLivreurSchema = z.object({
   params: idParam,

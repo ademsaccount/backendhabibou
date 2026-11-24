@@ -31,6 +31,13 @@ export const ERROR_CODES = [
   'UPLOADS_DISABLED',
   'FILE_REQUIRED',
   'INVALID_FILE_TYPE',
+  // medias de categories (GIF specialites)
+  'MEDIA_TYPE_UNSUPPORTED',
+  'MEDIA_TOO_LARGE',
+  'MEDIA_TOO_HEAVY',
+  'MEDIA_INVALID',
+  'MEDIA_IN_USE',
+  'CATEGORY_NOT_FOUND',
   // auth
   'USER_NOT_FOUND',
   'EMAIL_TAKEN',

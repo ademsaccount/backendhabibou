@@ -46,3 +46,52 @@ export async function uploadBuffer(
   const { data } = getSupabase().storage.from(env.SUPABASE_STORAGE_BUCKET).getPublicUrl(path);
   return data.publicUrl;
 }
+
+/** Upload vers un bucket SPECIFIQUE (ex. medias de categories) avec chemin
+ *  immutable : le nom de fichier est le hash de contenu, cacheControl long
+ *  (CDN + cache permanent device, jamais de revalidation). upsert=true : le
+ *  meme contenu ecrase le meme chemin (idempotent). */
+export async function uploadToBucket(
+  bucket: string,
+  path: string,
+  buffer: Buffer,
+  opts: { contentType: string; cacheControl?: string } = { contentType: 'application/octet-stream' },
+): Promise<string> {
+  if (!storageEnabled()) {
+    throw ApiError.notImplemented('Stockage fichier non configure (SUPABASE_URL / SERVICE_ROLE_KEY)', 'UPLOADS_DISABLED');
+  }
+  const { error } = await getSupabase().storage.from(bucket).upload(path, buffer, {
+    contentType: opts.contentType,
+    cacheControl: opts.cacheControl ?? '31536000',
+    upsert: true,
+  });
+  if (error) throw ApiError.badRequest(`Echec d'upload : ${error.message}`, 'UPLOAD_FAILED');
+  const { data } = getSupabase().storage.from(bucket).getPublicUrl(path);
+  return data.publicUrl;
+}
+
+/** Supprime un objet de Storage. Object absent = OK (remove ne passe pas en erreur). */
+export async function removeFromBucket(bucket: string, path: string): Promise<void> {
+  if (!storageEnabled()) return;
+  const { error } = await getSupabase().storage.from(bucket).remove([path]);
+  if (error) throw ApiError.badRequest(`Echec de suppression : ${error.message}`, 'UPLOAD_FAILED');
+}
+
+/** Cree le bucket s'il n'existe pas (public). Utilise par le seed — le bucket
+ *  public est aussi creable manuellement (voir README : Storage -> New bucket). */
+export async function ensurePublicBucket(bucket: string): Promise<void> {
+  if (!storageEnabled()) {
+    throw ApiError.notImplemented('Stockage fichier non configure (SUPABASE_URL / SERVICE_ROLE_KEY)', 'UPLOADS_DISABLED');
+  }
+  const { error: getError } = await getSupabase().storage.getBucket(bucket);
+  if (!getError) return; // deja la
+  // Un erreur RESEAU ne veut pas dire "bucket absent" : on ne tente pas de
+  // creation (sinon message trompeur), on echoue clairement et reproductible.
+  if (!/not found|does not exist|missing/i.test(getError.message)) {
+    throw ApiError.badRequest(`Lecture du bucket "${bucket}" impossible : ${getError.message}`, 'UPLOAD_FAILED');
+  }
+  const { error: createError } = await getSupabase().storage.createBucket(bucket, { public: true });
+  if (createError && !/already exists/i.test(createError.message)) {
+    throw ApiError.badRequest(`Impossible de creer le bucket "${bucket}" : ${createError.message}`, 'UPLOAD_FAILED');
+  }
+}

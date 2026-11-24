@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { createHash } from 'node:crypto';
 import { prisma } from '../lib/prisma';
 import { ApiError, asyncHandler } from '../lib/errors';
 import { requireAuth } from '../middleware/auth';
@@ -64,6 +65,56 @@ const productMenuOrderBy = [
   { category: 'asc' },
   { name: 'asc' },
 ] satisfies Prisma.ProductOrderByWithRelationInput[];
+
+/* ---------------- Catégories (specialites ecran Restaurants) ---------------- */
+
+/**
+ * Liste legere des categories actives (+ media WebP anime) pour l'ecran
+ * Restaurants. ETag derive du contenu : une requete inchangee repond 304
+ * sans retransferer la liste (If-None-Match envoye par le client).
+ */
+publicRouter.get(
+  '/categories',
+  asyncHandler(async (req, res) => {
+    const rows = await prisma.category.findMany({
+      where: { is_active: true },
+      orderBy: [{ position: 'asc' }, { created_at: 'asc' }],
+      select: {
+        id: true,
+        slug: true,
+        name_fr: true,
+        name_en: true,
+        name_aeb: true,
+        position: true,
+        media: { select: { public_url: true, version: true, width: true, height: true } },
+      },
+    });
+    const payload = rows.map((row) => ({
+      id: row.id,
+      slug: row.slug,
+      name_fr: row.name_fr,
+      name_en: row.name_en,
+      name_aeb: row.name_aeb,
+      position: row.position,
+      media: row.media
+        ? { url: row.media.public_url, version: row.media.version, width: row.media.width, height: row.media.height }
+        : null,
+    }));
+
+    const etag = `"${createHash('sha1').update(JSON.stringify(payload)).digest('hex').slice(0, 20)}"`;
+    res.setHeader('ETag', etag);
+    res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=600');
+
+    const ifNoneMatch = req.headers['if-none-match'];
+    if (ifNoneMatch) {
+      const candidates = ifNoneMatch.split(',').map((value) => value.trim());
+      if (candidates.includes(etag) || candidates.includes(`W/${etag}`)) {
+        return res.status(304).end();
+      }
+    }
+    return res.json(payload);
+  }),
+);
 
 publicRouter.get(
   '/restaurants',

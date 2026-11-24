@@ -10,6 +10,8 @@ const EnvSchema = z.object({
   SUPABASE_URL: z.string().default(''),
   SUPABASE_SERVICE_ROLE_KEY: z.string().default(''),
   SUPABASE_STORAGE_BUCKET: z.string().default('habichou'),
+  /** Bucket public des medias de categories (GIF specialites). */
+  SUPABASE_MEDIA_BUCKET: z.string().default('category-media'),
   JWT_ACCESS_SECRET: z.string().min(8, 'JWT_ACCESS_SECRET doit faire au moins 8 caracteres'),
   JWT_REFRESH_SECRET: z.string().min(8, 'JWT_REFRESH_SECRET doit faire au moins 8 caracteres'),
   JWT_ACCESS_TTL: z.string().default('15m'),

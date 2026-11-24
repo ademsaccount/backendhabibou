@@ -20,6 +20,10 @@ npm run db:generate        # genere le client Prisma
 npm run db:sql             # (re-)genere prisma/migrations/0_init/migration.sql sans connexion
 npm run db:migrate         # applique les migrations (prisma migrate deploy)
 npm run db:seed            # donnees de test
+npm run seed:categories    # (optionnel) GIF des categories Restaurants -> Supabase Storage
+                           #   idempotent : convertit les GIFs locaux en WebP anime <= 150 Ko,
+                           #   cree le bucket public SUPABASE_MEDIA_BUCKET (defaut: category-media)
+                           #   et lie burger/pizza (meme contenu = meme hash = aucune duplication)
 
 # 3. Serveur
 npm run dev                # http://localhost:4000 (tsx watch)
@@ -57,6 +61,10 @@ src/socket/io.ts          # auth JWT au handshake, rooms, events temps reel
 ## Varibles d'environnement
 
 Voir `.env.example`. `DATABASE_URL` est **obligatoire** ; `SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY` sont requis uniquement pour `POST /uploads` (Supabase Storage, bucket `habichou`) ; `STRIPE_SECRET_KEY` optionnel (sinon paiement carte simulé).
+
+### Bucket des medias de categories (GIF specialites)
+
+Les GIF de l'ecran Restaurants sont stockes sur **Supabase Storage** (jamais sur le disque Render) dans le bucket public `SUPABASE_MEDIA_BUCKET` (defaut `category-media`). `npm run seed:categories` **cree le bucket automatiquement** (public + lecture anonyme) ; si la creation echoue (droits REST limites), creez-le a la main dans Supabase Dashboard → Storage → New bucket → nom `category-media` → **Public bucket** coche, puis relancez le seed. Fichiers immutables `<sha256>.webp`, `cacheControl` 1 an.
 
 ## Tests
 

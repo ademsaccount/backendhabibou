@@ -1,10 +1,12 @@
-import { Router } from 'express';
+import { Router, type NextFunction, type Request, type Response } from 'express';
+import multer from 'multer';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../lib/prisma';
 import { ApiError, asyncHandler } from '../lib/errors';
 import { requireAuth, requireRole } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import {
+  createCategorySchema,
   createIngredientSchema,
   createLivreurSchema,
   createMedicationCategorySchema,
@@ -18,6 +20,8 @@ import {
   adminOrderStatusSchema,
   orderShopStatusSchema,
   orderStatusFilterQuery,
+  reorderCategoriesSchema,
+  updateCategorySchema,
   updateLivreurSchema,
   updateMedicationCategorySchema,
   updateProductSchema,
@@ -48,6 +52,7 @@ import { diffuseOrderToLivreurs, getFreeLivreurUserIds } from '../services/dispa
 // import { haversineKm, roundKm } from '../lib/geo';
 // --- FIN DÉSACTIVÉ ---
 import { orderInclude } from '../lib/orderInclude';
+import { deleteMediaAsset, processCategoryUpload } from '../lib/media';
 import { broadcast, emitToOrder } from '../socket/io';
 import { notify, notifyAssignedLivreur } from '../lib/notify';
 import { pushNewMessageToUser } from '../lib/push';
@@ -100,6 +105,29 @@ async function assertMedicationCategory(id: string | null | undefined) {
 
 export const adminRouter = Router();
 adminRouter.use(requireAuth, requireRole('admin'));
+
+/* -------- Mediatheque : upload de GIF de categories (memoire only, 3 Mo) -------- */
+const mediaUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 3 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const mime = (file.mimetype ?? '').toLowerCase();
+    if (mime === 'image/gif' || mime === 'image/webp') cb(null, true);
+    // Le controle complet (octets magiques) est fait dans lib/media.
+    else cb(new ApiError(400, 'MEDIA_TYPE_UNSUPPORTED', 'Formats acceptes : GIF ou WebP'));
+  },
+});
+
+/** Traduit les erreurs multer (taille, champ inattendu) en codes stables. */
+function mediaUploadError(err: unknown, _req: Request, _res: Response, next: NextFunction) {
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return next(ApiError.badRequest('Fichier trop volumineux (3 Mo maximum)', 'MEDIA_TOO_LARGE'));
+    }
+    return next(ApiError.badRequest(err.message, 'BAD_REQUEST'));
+  }
+  return next(err);
+}
 
 /* ---------------- Dashboard ---------------- */
 
@@ -882,6 +910,135 @@ adminRouter.delete(
       throw ApiError.conflict('Categorie liee a des produits : desactivez-la plutot', 'HAS_PRODUCTS');
     }
     await prisma.medicationCategory.delete({ where: { id: existing.id } });
+    res.status(204).send();
+  }),
+);
+
+/* ---------------- Médiathèque (GIF de categories, Supabase Storage) ---------------- */
+
+const mediaAssetInclude = { _count: { select: { categories: true } } } satisfies Prisma.MediaAssetInclude;
+
+adminRouter.post(
+  '/media',
+  mediaUpload.single('file'),
+  mediaUploadError,
+  asyncHandler(async (req, res) => {
+    if (!req.file) throw ApiError.badRequest('Fichier manquant (champ "file")', 'FILE_REQUIRED');
+    // Conversion (queue concurrency 1) + upload Storage + ligne MediaAsset.
+    const asset = await processCategoryUpload(req.file);
+    res.status(201).json(asset);
+  }),
+);
+
+adminRouter.get(
+  '/media',
+  asyncHandler(async (_req, res) => {
+    const assets = await prisma.mediaAsset.findMany({
+      orderBy: { created_at: 'desc' },
+      include: mediaAssetInclude,
+    });
+    res.json(assets);
+  }),
+);
+
+adminRouter.delete(
+  '/media/:id',
+  validate({ params: idParam }),
+  asyncHandler(async (req, res) => {
+    // Refuse (MEDIA_IN_USE) si lie a une categorie ; supprime le fichier Storage.
+    await deleteMediaAsset(req.params.id);
+    res.status(204).send();
+  }),
+);
+
+/* ---------------- Catégories (specialites de l'ecran Restaurants) ---------------- */
+
+const categoryInclude = { media: true } satisfies Prisma.CategoryInclude;
+const categoryOrderBy = [{ position: 'asc' }, { created_at: 'asc' }] satisfies Prisma.CategoryOrderByWithRelationInput[];
+
+/** Verifie l'existence d'un media lie (null/absent = delier, OK). */
+async function assertMediaAsset(id: string | null | undefined): Promise<void> {
+  if (!id) return;
+  const asset = await prisma.mediaAsset.findUnique({ where: { id } });
+  if (!asset) throw ApiError.notFound('Media introuvable');
+}
+
+adminRouter.get(
+  '/categories',
+  asyncHandler(async (_req, res) => {
+    const categories = await prisma.category.findMany({ orderBy: categoryOrderBy, include: categoryInclude });
+    res.json(categories);
+  }),
+);
+
+adminRouter.post(
+  '/categories',
+  validate(createCategorySchema),
+  asyncHandler(async (req, res) => {
+    const body = req.validated?.body as { position?: number; media_asset_id?: string | null } & Record<string, unknown>;
+    await assertMediaAsset(body.media_asset_id);
+    let position = body.position;
+    if (position === undefined) {
+      const agg = await prisma.category.aggregate({ _max: { position: true } });
+      position = (agg._max.position ?? -1) + 1;
+    }
+    const category = await prisma.category.create({
+      data: { ...body, position } as Prisma.CategoryUncheckedCreateInput,
+      include: categoryInclude,
+    });
+    res.status(201).json(category);
+  }),
+);
+
+// AVANT PATCH /:id (sinon "reorder" serait pris pour un id).
+adminRouter.patch(
+  '/categories/reorder',
+  validate(reorderCategoriesSchema),
+  asyncHandler(async (req, res) => {
+    const { ids } = req.validated?.body as { ids: string[] };
+    const unique = [...new Set(ids)];
+    const existing = await prisma.category.findMany({ select: { id: true } });
+    if (unique.length !== existing.length) {
+      throw ApiError.badRequest('La liste doit contenir TOUTES les categories (ordre complet)', 'VALIDATION_ERROR');
+    }
+    const known = new Set(existing.map((c) => c.id));
+    if (unique.some((id) => !known.has(id))) {
+      throw ApiError.badRequest('Identifiant de categorie inconnu', 'CATEGORY_NOT_FOUND');
+    }
+    await prisma.$transaction(
+      unique.map((id, index) => prisma.category.update({ where: { id }, data: { position: index } })),
+    );
+    const categories = await prisma.category.findMany({ orderBy: categoryOrderBy, include: categoryInclude });
+    res.json(categories);
+  }),
+);
+
+adminRouter.patch(
+  '/categories/:id',
+  validate(updateCategorySchema),
+  asyncHandler(async (req, res) => {
+    const existing = await prisma.category.findUnique({ where: { id: req.params.id } });
+    if (!existing) throw ApiError.notFound('Categorie introuvable', 'CATEGORY_NOT_FOUND');
+    const body = req.validated?.body as Record<string, unknown>;
+    if ('media_asset_id' in body) await assertMediaAsset(body.media_asset_id as string | null | undefined);
+    const category = await prisma.category.update({
+      where: { id: existing.id },
+      data: body as Prisma.CategoryUncheckedUpdateInput,
+      include: categoryInclude,
+    });
+    res.json(category);
+  }),
+);
+
+adminRouter.delete(
+  '/categories/:id',
+  validate({ params: idParam }),
+  asyncHandler(async (req, res) => {
+    const existing = await prisma.category.findUnique({ where: { id: req.params.id } });
+    if (!existing) throw ApiError.notFound('Categorie introuvable', 'CATEGORY_NOT_FOUND');
+    // Le lien media (SET NULL) part avec la categorie ; le MediaAsset reste
+    // dans la mediatheque (suppression separee, MEDIA_IN_USE protege le reste).
+    await prisma.category.delete({ where: { id: existing.id } });
     res.status(204).send();
   }),
 );

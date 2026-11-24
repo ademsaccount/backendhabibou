@@ -639,3 +639,45 @@ model SavedCart {
 
   @@index([user_id])
 }
+
+// Bibliotheque de medias (GIF de categories) : fichiers convertis en WebP
+// anime et stockes sur Supabase Storage (jamais sur le disque Render).
+// `version` = hash SHA-256 du contenu (nom de fichier immutable <hash>.webp).
+model MediaAsset {
+  id           String   @id @default(uuid())
+  name         String
+  storage_path String   @unique
+  public_url   String
+  mime_type    String   @default("image/webp")
+  width        Int?
+  height       Int?
+  size_bytes   Int
+  version      String
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+
+  categories Category[]
+
+  @@index([created_at])
+}
+
+// Categorie d'etablissement / specialite du client (ecran Restaurants) :
+// cle stable `slug` identique aux identifiants historiques de l'app
+// (fast_food, burger, pizza, plats) pour rester compatible avec les
+// versions installees qui lisent encore leurs GIFs locales.
+model Category {
+  id             String      @id @default(uuid())
+  slug           String      @unique
+  name_fr        String
+  name_en        String
+  name_aeb       String
+  position       Int         @default(0)
+  is_active      Boolean     @default(true)
+  media_asset_id String?
+  created_at     DateTime    @default(now())
+  updated_at     DateTime    @updatedAt
+
+  media MediaAsset? @relation(fields: [media_asset_id], references: [id], onDelete: SetNull)
+
+  @@index([is_active, position])
+}
