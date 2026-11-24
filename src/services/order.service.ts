@@ -1,4 +1,4 @@
-import type { Order, OrderStatus } from '@prisma/client';
+import type { Order, OrderStatus, Prisma } from '@prisma/client';
 import { env } from '../config/env';
 import { prisma } from '../lib/prisma';
 import { ApiError } from '../lib/errors';
@@ -79,9 +79,8 @@ export async function changeOrderStatus(
     adminLivreurId = livreurRecord.id;
   }
 
-  const updated = await prisma.order.update({
-    where: { id: order.id },
-    data: {
+  const updated = await prisma.$transaction(async (tx) => {
+    const data: Prisma.OrderUncheckedUpdateInput = {
       status: to,
       ...(adminLivreurId ? { livreur_id: adminLivreurId } : {}),
       // Sortie de "pending" ou de file : l'indicateur d'attente ne sert plus.
@@ -92,16 +91,36 @@ export async function changeOrderStatus(
             ...(order.payment_method === 'cash' || !stripeEnabled() ? { payment_status: 'paid' as const } : {}),
           }
         : {}),
-    },
-    include: {
-      items: { include: { product: true } },
-      restaurant: true,
-      address: true,
-      livreur: { include: { user: { select: { id: true, full_name: true, phone: true, avatar_url: true } } } },
-      user: { select: { id: true, full_name: true, phone: true } },
-      custom_request: true,
-      shop_statuses: { select: { restaurant_id: true, status: true } },
-    },
+      // Annulation AVANT pickup uniquement (TRANSITIONS n'autorise cancelled
+      // que depuis pending/confirmed/preparing) : le coupon de bienvenue
+      // redevient AVAILABLE. Order.coupon_id est UNIQUE, on le detache pour
+      // qu'il puisse servir a une nouvelle commande.
+      ...(to === 'cancelled' && order.coupon_id ? { coupon_id: null } : {}),
+    };
+
+    const result = await tx.order.update({
+      where: { id: order.id },
+      data,
+      include: {
+        items: { include: { product: true } },
+        restaurant: true,
+        address: true,
+        livreur: { include: { user: { select: { id: true, full_name: true, phone: true, avatar_url: true } } } },
+        user: { select: { id: true, full_name: true, phone: true } },
+        custom_request: true,
+        shop_statuses: { select: { restaurant_id: true, status: true } },
+      },
+    });
+
+    if (to === 'cancelled' && order.coupon_id) {
+      await tx.coupon.updateMany({
+        where: { id: order.coupon_id, status: 'USED' },
+        data: { status: 'AVAILABLE', used_at: null, order_id: null },
+      });
+      logger.info('coupon', `coupon bienvenue restaure user=${order.user_id}`);
+    }
+
+    return result;
   });
 
   const payload = { order_id: updated.id, status: updated.status, label: STATUS_LABELS[to] };

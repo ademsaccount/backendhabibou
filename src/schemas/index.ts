@@ -159,6 +159,8 @@ export const createOrderSchema = z.object({
   body: z.object({
     address_id: z.string().min(1, 'Adresse requise'),
     payment_method: z.enum(['card', 'cash']).default('cash'),
+    /** Coupon de bienvenue (livraison offerte) — optionnel, ignore par les anciens clients. */
+    use_welcome_coupon: z.boolean().optional(),
     items: z
       .array(
         z.object({

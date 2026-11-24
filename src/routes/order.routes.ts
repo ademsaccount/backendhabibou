@@ -208,6 +208,7 @@ orderRouter.post(
     const body = req.validated?.body as {
       address_id: string;
       payment_method: 'card' | 'cash';
+      use_welcome_coupon?: boolean;
       items: { product_id: string; quantity: number; notes?: string; options?: unknown; size_label?: string }[];
     };
 
@@ -348,18 +349,62 @@ orderRouter.post(
       const legsKm = coordsKnown ? pickupLegsKm(orderedShops, clientStop) : null;
       const fee = deliveryFee(legsKm, Math.max(0, orderedShopIds.length - 1));
 
-      return tx.order.create({
+      // Coupon de bienvenue : claim ATOMIQUE dans la meme transaction que la
+      // creation de commande. Le client n'envoie qu'un booleen — le montant
+      // remise est TOUJOURS le frais recalcule ici (jamais le prix client).
+      // Sans `use_welcome_coupon` (anciens clients), rien ne change.
+      let couponId: string | null = null;
+      let deliveryDiscount = 0;
+      if (body.use_welcome_coupon) {
+        // Rien a offrir (frais deja nuls / course sans frais) : 400 explicite,
+        // le coupon reste AVAILABLE (aucune consommation).
+        if (!(fee > 0)) {
+          throw ApiError.badRequest(
+            'Coupon non applicable a cette commande',
+            'COUPON_NOT_APPLICABLE',
+          );
+        }
+        const coupon = await tx.coupon.findUnique({
+          where: { user_id_source: { user_id: userId, source: 'WELCOME' } },
+        });
+        if (!coupon) throw ApiError.badRequest('Coupon introuvable', 'COUPON_NOT_FOUND');
+        if (coupon.status !== 'AVAILABLE') {
+          throw ApiError.badRequest('Coupon deja utilise', 'COUPON_ALREADY_USED');
+        }
+        // Claim atomique : une seule commande concurrente obtient count === 1 ;
+        // en cas d'echec la transaction annule tout (coupon intact).
+        const claimed = await tx.coupon.updateMany({
+          where: { id: coupon.id, user_id: userId, status: 'AVAILABLE' },
+          data: { status: 'USED', used_at: new Date() },
+        });
+        if (claimed.count !== 1) {
+          throw ApiError.badRequest('Coupon deja utilise', 'COUPON_ALREADY_USED');
+        }
+        couponId = coupon.id;
+        deliveryDiscount = fee;
+      }
+
+      const created = await tx.order.create({
         data: {
           user_id: userId,
           restaurant_id: restaurantId,
           address_id: body.address_id,
           payment_method: body.payment_method,
-          delivery_fee: fee,
-          total_price: subtotal + fee,
+          // Coupon applique : le frais effectif tombe a 0 et la remise trace le
+          // montant offert ; total = articles seuls.
+          delivery_fee: deliveryDiscount > 0 ? 0 : fee,
+          delivery_discount: deliveryDiscount,
+          total_price: subtotal + fee - deliveryDiscount,
+          coupon_id: couponId,
           items: { create: orderItems },
         },
         include: orderInclude,
       });
+      // Lien inverse (miroir) pour l'admin / la restauration a l'annulation.
+      if (couponId) {
+        await tx.coupon.update({ where: { id: couponId }, data: { order_id: created.id } });
+      }
+      return created;
     });
 
     const restaurantName = order.restaurant?.name ?? 'Commerce';
@@ -594,10 +639,21 @@ orderRouter.put(
     if (!['pending', 'confirmed'].includes(order.status)) {
       throw ApiError.badRequest('Annulation impossible a ce stade', 'CANNOT_CANCEL');
     }
-    const updated = await prisma.order.update({
-      where: { id: order.id },
-      data: { status: 'cancelled' },
-      include: orderInclude,
+    const updated = await prisma.$transaction(async (tx) => {
+      const result = await tx.order.update({
+        where: { id: order.id },
+        // Coupon de bienvenue : on detache la commande (coupon_id UNIQUE) dans
+        // la meme transaction que la restauration du coupon.
+        data: { status: 'cancelled', ...(order.coupon_id ? { coupon_id: null } : {}) },
+        include: orderInclude,
+      });
+      if (order.coupon_id) {
+        await tx.coupon.updateMany({
+          where: { id: order.coupon_id, status: 'USED' },
+          data: { status: 'AVAILABLE', used_at: null, order_id: null },
+        });
+      }
+      return result;
     });
     await notify({
       user_id: order.user_id,

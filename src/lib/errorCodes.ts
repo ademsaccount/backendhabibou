@@ -105,6 +105,10 @@ export const ERROR_CODES = [
   // panier sauvegarde
   'SAVED_CART_LIMIT',
   'SAVED_CART_NOT_FOUND',
+  // coupon (bienvenue)
+  'COUPON_NOT_FOUND',
+  'COUPON_ALREADY_USED',
+  'COUPON_NOT_APPLICABLE',
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];

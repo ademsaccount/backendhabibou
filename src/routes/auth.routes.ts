@@ -31,6 +31,7 @@ import {
   verificationCodeExpiry,
 } from '../lib/passwordReset';
 import { toSafeUser } from '../lib/user';
+import { grantWelcomeCoupon, sendWelcomeCouponNotification } from '../lib/coupons';
 import { uploadBuffer } from '../lib/upload';
 
 const router = Router();
@@ -388,6 +389,9 @@ router.post(
 
     let user = await prisma.user.findUnique({ where: { google_id: payload.sub } });
     let outcome: 'existing' | 'linked' | 'created' = 'existing';
+    // Vrai si le compte devient verifie dans CE appel (nouveau ou relicte) :
+    // c'est le seul moment ou le coupon de bienvenue est accorde.
+    let justVerified = false;
 
     if (!user) {
       // Compte local existant avec le meme email : on lie Google sans toucher
@@ -402,6 +406,7 @@ router.post(
             'GOOGLE_ACCOUNT_LINKED',
           );
         }
+        justVerified = !byEmail.email_verified_at;
         user = await prisma.user.update({
           where: { id: byEmail.id },
           data: {
@@ -427,6 +432,7 @@ router.post(
           },
         });
         outcome = 'created';
+        justVerified = true;
       }
     }
 
@@ -436,9 +442,18 @@ router.post(
         where: { id: user.id },
         data: { email_verified_at: new Date() },
       });
+      justVerified = true;
     }
 
     logger.info('auth', `google sign-in ${outcome} user=${user.id}`);
+
+    // Coupon de bienvenue : accorde a la premiere verification du compte.
+    // Jamais jetant (grant est idempotent, notification best effort) et ne
+    // retarde pas la reponse d'authentification.
+    if (justVerified) {
+      await grantWelcomeCoupon(user.id);
+      void sendWelcomeCouponNotification(user.id);
+    }
 
     // Meme contrat que /login : access + refresh JWT + user safe.
     const tokens = await issueTokens(user.id, user.role);
@@ -491,6 +506,10 @@ router.post(
     }
 
     const verifiedAt = new Date();
+    // Un code n'existe que pour un compte non verifie (register / resend) :
+    // on capture l'etat avant pour ne jamais accorder de coupon a un compte
+    // deja verifie (pas de backfill).
+    const wasVerified = user.email_verified_at !== null;
     await prisma.$transaction([
       prisma.user.update({ where: { id: user.id }, data: { email_verified_at: verifiedAt } }),
       prisma.emailVerificationCode.update({
@@ -508,6 +527,12 @@ router.post(
     // Meme contrat que /login : l'app connecte l'utilisateur directement.
     const tokens = await issueTokens(user.id, user.role);
     logger.info('auth', `email verified user=${user.id}`);
+    // Coupon de bienvenue : premiere verification du compte (jamais jetant,
+    // n'interrompt pas la connexion).
+    if (!wasVerified) {
+      await grantWelcomeCoupon(user.id);
+      void sendWelcomeCouponNotification(user.id);
+    }
     res.json({ ...tokens, user: toSafeUser(user) });
   }),
 );
@@ -640,6 +665,9 @@ router.post(
     if (!valid) throw ApiError.badRequest('Code invalide ou expire', 'INVALID_RESET_CODE');
 
     const password_hash = await bcrypt.hash(password, 10);
+    // Le reset ne verifie le compte que s'il ne l'etait pas : dans ce cas
+    // (premiere verification) le coupon de bienvenue est accorde.
+    const justVerified = !user.email_verified_at;
     await prisma.$transaction([
       prisma.user.update({
         where: { id: user.id },
@@ -656,6 +684,10 @@ router.post(
     ]);
 
     logger.info('auth', `password reset user=${user.id}`);
+    if (justVerified) {
+      await grantWelcomeCoupon(user.id);
+      void sendWelcomeCouponNotification(user.id);
+    }
     return res.json({ ok: true });
   }),
 );

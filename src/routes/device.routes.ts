@@ -5,6 +5,7 @@ import { logger } from '../lib/logger';
 import { requireAuth } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { pushTokenSchema } from '../schemas';
+import { sendDeferredWelcomeNotification } from '../lib/coupons';
 
 /**
  * Appareils / jetons de notification push.
@@ -34,6 +35,9 @@ deviceRouter.post(
       'push',
       `jeton ${push_token ? 'enregistre' : 'retire'} user=${req.user.id}${locale ? ` locale=${locale}` : ''}`,
     );
+    // Premier jeton apres verification : le push de bienvenue (coupon) a pu
+    // etre differe faute de jeton — on l'envoie maintenant (best effort).
+    if (push_token) void sendDeferredWelcomeNotification(req.user.id);
     res.json({ ok: true, registered: Boolean(push_token) });
   }),
 );

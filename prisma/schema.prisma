@@ -72,6 +72,19 @@ enum StoryMedia {
 }
 
 /** Origine du compte : mot de passe local ou connexion Google. */
+enum CouponStatus {
+  AVAILABLE
+  USED
+}
+
+enum CouponType {
+  FREE_DELIVERY
+}
+
+enum CouponSource {
+  WELCOME
+}
+
 enum AuthProvider {
   local
   google
@@ -110,6 +123,7 @@ model User {
   email_verification_codes EmailVerificationCode[]
   restaurants_created Restaurant[] @relation("RestaurantCreatedBy")
   saved_carts     SavedCart[]
+  coupons         Coupon[]
 
   @@index([role])
 }
@@ -452,6 +466,37 @@ model CartItem {
   @@index([cart_id])
 }
 
+/**
+ * Coupon (bienvenue) : un seul par utilisateur et par source (WELCOME),
+ * accorde a la verification du compte. Jamais recupere (pas de backfill).
+ * Lien vers la commande utilisee via Order.coupon_id (unique) ; order_id ici
+ * est un simple miroir pour lecture admin/annulation sans jointure inverse.
+ */
+model Coupon {
+  id           String       @id @default(uuid())
+  user_id      String
+  type         CouponType   @default(FREE_DELIVERY)
+  source       CouponSource
+  status       CouponStatus @default(AVAILABLE)
+  /** Date d'utilisation (positionee lors du claim atomique). */
+  used_at      DateTime?
+  /** Commande qui a consomme le coupon (miroir de Order.coupon_id). */
+  order_id     String?
+  /** Vu dans le modal / liste coupons (idempotent). */
+  seen_at      DateTime?
+  /** Push bienvenue envoye (null = pas encore ; envoi differe si pas de token). */
+  welcome_notified_at DateTime?
+  created_at   DateTime     @default(now())
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  /** Cote "back" de Order.coupon (FK = Order.coupon_id). */
+  order Order?
+
+  @@unique([user_id, source])
+  @@index([user_id, status])
+  @@index([user_id])
+}
+
 model Order {
   id                String        @id @default(uuid())
   user_id           String
@@ -474,6 +519,10 @@ model Order {
   diffused_to       String[]  @default([])
   rejected_by       String[]  @default([])
   address_id        String
+  /** Coupon de bienvenue applique (null = aucun). Unique : un coupon = une commande. */
+  coupon_id         String?       @unique
+  /** Montant de frais de livraison rembourse par le coupon (0 = aucun remboursement). */
+  delivery_discount Float         @default(0)
   created_at        DateTime      @default(now())
   delivered_at      DateTime?
 
@@ -482,6 +531,7 @@ model Order {
   custom_request CustomRequest? @relation(fields: [custom_request_id], references: [id])
   livreur        Livreur?       @relation(fields: [livreur_id], references: [id])
   address        Address        @relation(fields: [address_id], references: [id])
+  coupon         Coupon?        @relation(fields: [coupon_id], references: [id])
   items          OrderItem[]
   messages       OrderMessage[]
   review         Review?

@@ -10,6 +10,7 @@ import { notificationRouter, uploadRouter } from './routes/common.routes';
 // Demandes spécifiques côté client (flux "Demande spécifique" de l'app habichou).
 import { adminCustomRequestRouter, customRequestRouter } from './routes/customRequest.routes';
 import { orderRouter } from './routes/order.routes';
+import { couponRouter } from './routes/coupons.routes';
 import { deviceRouter } from './routes/device.routes';
 import { userRouter } from './routes/user.routes';
 import savedCartRouter from './routes/savedCart.routes';
@@ -46,6 +47,7 @@ export function createApp() {
   app.use('/addresses', addressRouter);
   app.use('/custom-requests', customRequestRouter);
   app.use('/orders', orderRouter);
+  app.use('/coupons', couponRouter);
   app.use('/devices', deviceRouter);
   app.use('/notifications', notificationRouter);
   app.use('/uploads', uploadRouter);
