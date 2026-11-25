@@ -28,15 +28,16 @@ const EnvSchema = z.object({
   GOOGLE_IOS_CLIENT_ID: z.string().default(''),
   GOOGLE_ANDROID_CLIENT_ID: z.string().default(''),
   /**
-   * Envoi d'emails (reinitialisation de mot de passe) via l'API HTTP Brevo.
+   * Envoi d'emails (reinitialisation de mot de passe) via l'API HTTP Mailjet.
    * Optionnel : sans configuration, le code n'est renvoye qu'en developpement.
    * (SMTP inutilisable : Render bloque les ports 25/465/587.)
    */
-  BREVO_API_KEY: z.string().default(''),
-  /** Expediteur, ex. "no-reply@habichou.tn". */
-  MAIL_FROM_EMAIL: z.string().default(''),
-  /** Nom affiche de l'expediteur. */
-  MAIL_FROM_NAME: z.string().default('Habichou'),
+  MAILJET_API_KEY: z.string().default(''),
+  MAILJET_SECRET_KEY: z.string().default(''),
+  /** Expediteur verifie dans Mailjet, ex. "no-reply@habichou.tn". */
+  MAILJET_SENDER_EMAIL: z.string().default(''),
+  /** Nom affiche de l'expediteur, ex. "Habichou". */
+  MAILJET_SENDER_NAME: z.string().default(''),
   /** Duree de vie du code de reinitialisation (minutes). */
   PASSWORD_RESET_TTL_MIN: z.coerce.number().int().positive().default(15),
   /** Nombre d'essais autorises avant invalidation du code. */

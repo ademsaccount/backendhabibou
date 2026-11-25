@@ -2,8 +2,8 @@ import { env } from '../config/env';
 import { logger } from './logger';
 
 /**
- * Envoi d'emails transactionnels via l'API HTTP Brevo
- * (POST https://api.brevo.com/v3/smtp/email).
+ * Envoi d'emails transactionnels via l'API HTTP Mailjet Send v3.1
+ * (POST https://api.mailjet.com/v3.1/send).
  *
  * L'API HTTP remplace SMTP : les services Render (plan gratuit) bloquent les
  * ports sortants 25/465/587. Aucune dependance externe (fetch natif).
@@ -16,7 +16,7 @@ import { logger } from './logger';
  * Aucune cle API, aucun code ni mot de passe n'est journalise.
  */
 
-const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
+const MAILJET_API_URL = 'https://api.mailjet.com/v3.1/send';
 /** Ne jamais bloquer une requete HTTP trop longtemps sur une API lente. */
 const SEND_TIMEOUT_MS = 10_000;
 
@@ -89,9 +89,21 @@ function normalizeLocale(locale?: string | null): MailLocale {
   return locale === 'en' || locale === 'aeb' ? locale : 'fr';
 }
 
-/** true si les variables Brevo necessaires sont presentes. */
+/** Variables Mailjet manquantes (noms uniquement, jamais les valeurs). */
+function missingMailjetVariables(): string[] {
+  return [
+    { key: 'MAILJET_API_KEY', value: env.MAILJET_API_KEY },
+    { key: 'MAILJET_SECRET_KEY', value: env.MAILJET_SECRET_KEY },
+    { key: 'MAILJET_SENDER_EMAIL', value: env.MAILJET_SENDER_EMAIL },
+    { key: 'MAILJET_SENDER_NAME', value: env.MAILJET_SENDER_NAME },
+  ]
+    .filter((entry) => !entry.value.trim())
+    .map((entry) => entry.key);
+}
+
+/** true si les quatre variables Mailjet necessaires sont presentes. */
 export function isMailConfigured(): boolean {
-  return Boolean(env.BREVO_API_KEY && env.MAIL_FROM_EMAIL);
+  return missingMailjetVariables().length === 0;
 }
 
 function escapeHtml(value: string): string {
@@ -103,16 +115,45 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
-/** Message d'erreur Brevo (code + message), jamais la cle ni le corps envoye. */
-function brevoErrorMessage(status: number, body: unknown): string {
-  let detail = '';
+/** Message d'erreur Mailjet (code + message), jamais la cle ni le corps envoye. */
+function mailjetErrorDetail(body: unknown): string {
+  const details: string[] = [];
+
+  const push = (code: unknown, message: unknown) => {
+    const safeCode = typeof code === 'string' ? code : '';
+    const safeMessage = typeof message === 'string' ? message : '';
+    const detail = [safeCode, safeMessage].filter(Boolean).join(' ');
+    if (detail) details.push(detail);
+  };
+
   if (body && typeof body === 'object') {
-    const record = body as { code?: unknown; message?: unknown };
-    const code = typeof record.code === 'string' ? record.code : '';
-    const message = typeof record.message === 'string' ? record.message : '';
-    detail = [code, message].filter(Boolean).join(' ');
+    const record = body as Record<string, unknown>;
+    push(record.ErrorCode, record.ErrorMessage);
+
+    if (Array.isArray(record.Errors)) {
+      for (const item of record.Errors) {
+        if (item && typeof item === 'object') {
+          const error = item as Record<string, unknown>;
+          push(error.ErrorCode, error.ErrorMessage);
+        }
+      }
+    }
   }
-  return detail ? `brevo ${status}: ${detail}` : `brevo ${status}`;
+
+  return details.join('; ');
+}
+
+function mailjetErrorMessage(
+  status: number,
+  body: unknown,
+  messageStatus?: string,
+): string {
+  const detail = mailjetErrorDetail(body);
+  const parts = [
+    messageStatus ? `status=${messageStatus}` : '',
+    detail,
+  ].filter(Boolean);
+  return parts.length ? `mailjet ${status}: ${parts.join(' ')}` : `mailjet ${status}`;
 }
 
 /** Gabarit commun des emails « code a 6 chiffres » (HTML + texte brut). */
@@ -152,40 +193,60 @@ function renderCodeEmail(
 }
 
 /**
- * POST vers l'API Brevo. Lance une erreur si le statut est hors 2xx ou si la
+ * POST vers l'API Mailjet. Lance une erreur si le statut HTTP est hors 2xx,
+ * si Mailjet renvoie un statut de message autre que « success », ou si la
  * requete echoue / depasse le delai : l'appelant transforme cela en
  * MAIL_UNAVAILABLE (ou en fallback dev). Journalise le statut et le message
- * d'erreur Brevo — jamais la cle, jamais le code.
+ * d'erreur Mailjet — jamais la cle, jamais le code.
  */
-async function sendBrevoMail(opts: {
+async function sendMailjetMail(opts: {
   to: string;
   subject: string;
   textContent: string;
   htmlContent: string;
 }): Promise<void> {
+  const missing = missingMailjetVariables();
+  if (missing.length > 0) {
+    throw new Error(`mailjet non configure: variables manquantes ${missing.join(', ')}`);
+  }
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
 
   try {
-    const response = await fetch(BREVO_API_URL, {
+    // Basic auth : MAILJET_API_KEY (public) en utilisateur, MAILJET_SECRET_KEY
+    // (privee) en mot de passe. Le header n'est jamais journalise.
+    const authorization = Buffer.from(
+      `${env.MAILJET_API_KEY}:${env.MAILJET_SECRET_KEY}`,
+      'utf8',
+    ).toString('base64');
+
+    const response = await fetch(MAILJET_API_URL, {
       method: 'POST',
       headers: {
-        'api-key': env.BREVO_API_KEY,
+        authorization: `Basic ${authorization}`,
         'content-type': 'application/json',
         accept: 'application/json',
       },
       body: JSON.stringify({
-        sender: { name: env.MAIL_FROM_NAME, email: env.MAIL_FROM_EMAIL },
-        to: [{ email: opts.to }],
-        subject: opts.subject,
-        htmlContent: opts.htmlContent,
-        textContent: opts.textContent,
+        Messages: [
+          {
+            From: {
+              Email: env.MAILJET_SENDER_EMAIL,
+              Name: env.MAILJET_SENDER_NAME,
+            },
+            To: [{ Email: opts.to }],
+            Subject: opts.subject,
+            TextPart: opts.textContent,
+            HTMLPart: opts.htmlContent,
+          },
+        ],
       }),
       signal: controller.signal,
     });
 
     // Reponse lue pour le diagnostic uniquement : ni la cle ni le code n'y
-    // figurent, mais on ne logge que le statut et le message d'erreur Brevo.
+    // figurent, mais on ne logge que le statut et le message d'erreur Mailjet.
     let body: unknown = null;
     try {
       body = await response.json();
@@ -193,17 +254,44 @@ async function sendBrevoMail(opts: {
       body = null;
     }
 
+    const messages =
+      body && typeof body === 'object'
+        ? (body as { Messages?: unknown }).Messages
+        : undefined;
+    const firstMessage = Array.isArray(messages) ? messages[0] : undefined;
+    const messageStatus =
+      firstMessage && typeof firstMessage === 'object'
+        ? (firstMessage as { Status?: unknown }).Status
+        : undefined;
+    const safeMessageStatus =
+      typeof messageStatus === 'string' ? messageStatus : undefined;
+
     if (!response.ok) {
-      const detail = brevoErrorMessage(response.status, body);
+      const detail = mailjetErrorMessage(response.status, body, safeMessageStatus);
+      logger.error('mail', `echec d'envoi ${detail}`);
+      throw new Error(detail);
+    }
+
+    // Mailjet peut repondre 200 avec un statut d'erreur par message.
+    if (safeMessageStatus !== 'success') {
+      const detail = mailjetErrorMessage(
+        response.status,
+        body,
+        safeMessageStatus ?? 'invalid response',
+      );
       logger.error('mail', `echec d'envoi ${detail}`);
       throw new Error(detail);
     }
 
     logger.info('mail', `email sent status=${response.status}`);
   } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
+    if (
+      error &&
+      typeof error === 'object' &&
+      (error as { name?: unknown }).name === 'AbortError'
+    ) {
       logger.error('mail', `echec d'envoi timeout=${SEND_TIMEOUT_MS}ms`);
-      throw new Error(`brevo timeout apres ${SEND_TIMEOUT_MS}ms`);
+      throw new Error(`mailjet timeout apres ${SEND_TIMEOUT_MS}ms`);
     }
     // Relance telle quelle (le message ne contient jamais la cle ni le code).
     throw error;
@@ -214,7 +302,7 @@ async function sendBrevoMail(opts: {
 
 /**
  * Envoie le code de reinitialisation. Le code n'apparait que dans l'email :
- * ni dans les logs, ni dans la reponse HTTP (sauf fallback dev sans Brevo).
+ * ni dans les logs, ni dans la reponse HTTP (sauf fallback dev sans Mailjet).
  */
 export async function sendPasswordResetCode(
   to: string,
@@ -222,11 +310,11 @@ export async function sendPasswordResetCode(
   locale?: string | null,
 ): Promise<void> {
   const mail = renderCodeEmail(COPY_RESET[normalizeLocale(locale)], code, env.PASSWORD_RESET_TTL_MIN);
-  await sendBrevoMail({ to, ...mail });
+  await sendMailjetMail({ to, ...mail });
 }
 
 /**
- * Envoie le code de verification d'inscription. Meme regles que le
+ * Envoie le code de verification d'inscription. Meme regles que la
  * reinitialisation : le code n'apparait que dans l'email.
  */
 export async function sendEmailVerificationCode(
@@ -239,5 +327,5 @@ export async function sendEmailVerificationCode(
     code,
     env.EMAIL_VERIFICATION_TTL_MIN,
   );
-  await sendBrevoMail({ to, ...mail });
+  await sendMailjetMail({ to, ...mail });
 }

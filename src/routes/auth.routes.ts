@@ -172,7 +172,7 @@ type SendVerificationResult =
  *
  * - cooldown par compte (RESEND_COOLDOWN_MS) si `respectCooldown` ;
  * - un seul code actif : les anciens (y compris consommes) sont supprimes ;
- * - dev sans Brevo : le code est retourne comme `dev_code` (jamais en prod) ;
+ * - dev sans Mailjet : le code est retourne comme `dev_code` (jamais en prod) ;
  * - echec d'envoi : le code inutilisable est supprime (pour ne pas bloquer le
  *   prochain envoi par le cooldown) et `failed` est retourne — l'appelant
  *   decide (503 sur /register, 200 silencieux sur /resend-verification,
@@ -198,11 +198,11 @@ async function sendVerificationCode(
 
   if (!isMailConfigured()) {
     if (isProd) {
-      logger.warn('mail', 'Brevo non configure (prod) : code de verification non envoye');
+      logger.warn('mail', 'Mailjet non configure (prod) : code de verification non envoye');
       return { status: 'failed' };
     }
     await storeVerificationCode(user.id, code);
-    logger.warn('mail', `Brevo non configure : code de verification (dev) user=${user.id}`);
+    logger.warn('mail', `Mailjet non configure : code de verification (dev) user=${user.id}`);
     return { status: 'sent', dev_code: code };
   }
 
@@ -222,7 +222,7 @@ async function sendVerificationCode(
         .catch(() => undefined);
       return { status: 'failed' };
     }
-    // Dev : Brevo mal configure -> on donne le code pour ne pas bloquer.
+    // Dev : Mailjet mal configure -> on donne le code pour ne pas bloquer.
     return { status: 'sent', dev_code: code };
   }
 }
@@ -337,7 +337,7 @@ router.post(
         403,
         'EMAIL_NOT_VERIFIED',
         'Veuillez verifier votre email avant de vous connecter',
-        // Uniquement en dev sans Brevo : sert de fallback `dev_code` a l'app.
+        // Uniquement en dev sans Mailjet : sert de fallback `dev_code` a l'app.
         send.status === 'sent' && send.dev_code ? { dev_code: send.dev_code } : undefined,
       );
     }
@@ -543,7 +543,7 @@ router.post(
  * Anti-enumeration : reponse TOUJOURS 200 `{ ok: true }` (compte inconnu,
  * deja verifie ou cooldown). Le code n'est envoye que si le compte existe et
  * n'est pas verifie ; un echec d'envoi ne change pas la reponse. En dev sans
- * Brevo, `dev_code` est renvoye (jamais en production).
+ * Mailjet, `dev_code` est renvoye (jamais en production).
  */
 router.post(
   '/resend-verification',
@@ -566,7 +566,7 @@ router.post(
  * Mot de passe oublie, etape 1 : envoi d'un code a 6 chiffres par email.
  *
  * Anti-enumeration : la reponse est TOUJOURS 200 `{ ok: true }`, que le compte
- * existe ou non (et meme pendant le cooldown). En developpement, si Brevo n'est
+ * existe ou non (et meme pendant le cooldown). En developpement, si Mailjet n'est
  * pas configure (ou echoue), le code est renvoye dans `dev_code` (jamais en
  * production, jamais journalise).
  */
@@ -599,7 +599,7 @@ router.post(
       }
       logger.warn(
         'mail',
-        `Brevo non configure : code de reinitialisation (dev) user=${user.id}`,
+        `Mailjet non configure : code de reinitialisation (dev) user=${user.id}`,
       );
       return res.json({ ...ok, dev_code: code });
     }
@@ -615,7 +615,7 @@ router.post(
       if (isProd) {
         throw new ApiError(503, 'MAIL_UNAVAILABLE', "Impossible d'envoyer l'email pour le moment");
       }
-      // Dev : Brevo mal configure -> on donne le code pour ne pas bloquer.
+      // Dev : Mailjet mal configure -> on donne le code pour ne pas bloquer.
       logger.warn('mail', `fallback dev : code de reinitialisation user=${user.id}`);
       return res.json({ ...ok, dev_code: code });
     }
