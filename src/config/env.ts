@@ -42,6 +42,14 @@ const EnvSchema = z.object({
   /** Cle privee .p8 Apple ; les "\n" litteraux sont remplaces au chargement. */
   APPLE_PRIVATE_KEY: z.string().default(''),
   /**
+   * Secret HMAC des empreintes de coupon de bienvenue (anti-abus apres
+   * suppression de compte). Vide par defaut : en production il est REFUSE au
+   * demarrage s'il manque ou s'il fait moins de 32 caracteres.
+   * Doit avoir la MEME valeur localement et sur Render (sinon les empreintes
+   * locales ne correspondront pas a celles de la base).
+   */
+  WELCOME_CLAIM_SECRET: z.string().default(''),
+  /**
    * Envoi d'emails (reinitialisation de mot de passe) via l'API HTTP Mailjet.
    * Optionnel : sans configuration, le code n'est renvoye qu'en developpement.
    * (SMTP inutilisable : Render bloque les ports 25/465/587.)
@@ -80,6 +88,18 @@ if (!parsed.success) {
     logger.error('env', `${issue.path.join('.')}: ${issue.message}`);
   }
   logger.error('env', 'copy .env.example to .env and complete the values');
+  process.exit(1);
+}
+
+/**
+ * Secret des empreintes du coupon de bienvenue : REFUSE en production s'il
+ * manque ou s'il fait moins de 32 caracteres. Un secret court rendrait les
+ * empreintes devinables par dictionnaire (emails en clair recuperables).
+ * Jamais journalise.
+ */
+if (parsed.data.NODE_ENV === 'production' && parsed.data.WELCOME_CLAIM_SECRET.length < 32) {
+  logger.error('env', 'WELCOME_CLAIM_SECRET manquant ou trop court : 32 caracteres minimum');
+  logger.error('env', 'ajoute la meme valeur dans le .env de Render et dans .env.example');
   process.exit(1);
 }
 

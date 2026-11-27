@@ -33,7 +33,8 @@ import {
   verificationCodeExpiry,
 } from '../lib/passwordReset';
 import { toSafeUser } from '../lib/user';
-import { grantWelcomeCoupon, sendWelcomeCouponNotification } from '../lib/coupons';
+import { sendWelcomeCouponNotification } from '../lib/coupons';
+import { grantWelcomeCouponWithClaim, welcomeClaimIdentifiersFromUser } from '../lib/welcomeClaim';
 import { uploadBuffer } from '../lib/upload';
 
 const router = Router();
@@ -466,12 +467,16 @@ router.post(
 
     logger.info('auth', `google sign-in ${outcome} user=${user.id}`);
 
-    // Coupon de bienvenue : accorde a la premiere verification du compte.
-    // Jamais jetant (grant est idempotent, notification best effort) et ne
-    // retarde pas la reponse d'authentification.
+    // Coupon de bienvenue : accorde a la premiere verification du compte,
+    // SAUF si un identifiant de ce compte (email / telephone / sub) a deja
+    // reclame le coupon — y compris via un compte depuis SUPPRIME (anti-abus).
+    // Jamais jetant, ne retarde pas la reponse d'authentification.
     if (justVerified) {
-      await grantWelcomeCoupon(user.id);
-      void sendWelcomeCouponNotification(user.id);
+      const granted = await grantWelcomeCouponWithClaim(
+        user.id,
+        welcomeClaimIdentifiersFromUser(user),
+      );
+      if (granted) void sendWelcomeCouponNotification(user.id);
     }
 
     // Meme contrat que /login : access + refresh JWT + user safe.
@@ -603,10 +608,14 @@ router.post(
 
     logger.info('auth', `apple sign-in ${outcome} user=${user.id}`);
 
-    // Coupon de bienvenue : accorde a la premiere verification du compte.
+    // Coupon de bienvenue : accorde a la premiere verification du compte,
+    // sauf si un identifiant du compte a deja reclame le coupon (anti-abus).
     if (justVerified) {
-      await grantWelcomeCoupon(user.id);
-      void sendWelcomeCouponNotification(user.id);
+      const granted = await grantWelcomeCouponWithClaim(
+        user.id,
+        welcomeClaimIdentifiersFromUser(user),
+      );
+      if (granted) void sendWelcomeCouponNotification(user.id);
     }
 
     const tokens = await issueTokens(user.id, user.role);
@@ -681,10 +690,14 @@ router.post(
     const tokens = await issueTokens(user.id, user.role);
     logger.info('auth', `email verified user=${user.id}`);
     // Coupon de bienvenue : premiere verification du compte (jamais jetant,
-    // n'interrompt pas la connexion).
+    // n'interrompt pas la connexion). Refuse si un identifiant du compte a
+    // deja reclame le coupon, y compris apres une suppression de compte.
     if (!wasVerified) {
-      await grantWelcomeCoupon(user.id);
-      void sendWelcomeCouponNotification(user.id);
+      const granted = await grantWelcomeCouponWithClaim(
+        user.id,
+        welcomeClaimIdentifiersFromUser(user),
+      );
+      if (granted) void sendWelcomeCouponNotification(user.id);
     }
     res.json({ ...tokens, user: toSafeUser(user) });
   }),
@@ -839,9 +852,14 @@ router.post(
     ]);
 
     logger.info('auth', `password reset user=${user.id}`);
+    // Meme regle que les autres inscriptions : verification d'un compte
+    // inacheve = potentiellement un re-inscrit apres suppression (anti-abus).
     if (justVerified) {
-      await grantWelcomeCoupon(user.id);
-      void sendWelcomeCouponNotification(user.id);
+      const granted = await grantWelcomeCouponWithClaim(
+        user.id,
+        welcomeClaimIdentifiersFromUser(user),
+      );
+      if (granted) void sendWelcomeCouponNotification(user.id);
     }
     return res.json({ ok: true });
   }),

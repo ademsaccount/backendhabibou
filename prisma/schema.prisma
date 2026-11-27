@@ -91,6 +91,24 @@ enum AuthProvider {
   apple
 }
 
+/// Anti-abus du coupon de bienvenue : empreintes HMAC-SHA256 des identifiants
+/// (email / telephone / sub Google / sub Apple) qui ont DEJA reclame le coupon,
+/// meme apres la suppression du compte.
+///
+/// - AUCUNE foreign key vers User : la suppression de compte ne supprime
+///   jamais ces lignes (c'est le but : la re-inscription apres suppression ne
+///   doit pas re-debloquer le coupon). Toutes les donnees personnelles du
+///   compte restent supprimees ailleurs ; seules des empreintes anonymes
+///   restent ici, jamais d'identifiant en clair.
+model WelcomeCouponClaim {
+  id         String   @id @default(uuid())
+  /// HMAC-SHA256(WELCOME_CLAIM_SECRET, "kind:valeur_normalisee") — hex.
+  key_hash   String   @unique
+  /// 'email' | 'phone' | 'google' | 'apple'
+  kind       String
+  created_at DateTime @default(now())
+}
+
 model User {
   id            String   @id @default(uuid())
   // Nullable : un compte Sign in with Apple peut ne fournir aucun email

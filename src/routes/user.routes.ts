@@ -12,6 +12,7 @@ import { requireAuth, requireRole } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { deleteAccountSchema, updateMeSchema } from '../schemas';
 import { toSafeUser } from '../lib/user';
+import { recordWelcomeClaims } from '../lib/welcomeClaim';
 
 /** Categories COMMERCE considerees comme repas (stats « top meals ») :
  *  restaurant + snack. epicerie / pharmacie / tabac écartés. */
@@ -183,6 +184,14 @@ userRouter.delete(
 
       await tx.customRequest.deleteMany({ where: { user_id: user.id } });
       // Les commandes ont deja coupon_id = NULL ci-dessus.
+      //
+      // IMPORTANT (anti-abus) : les coupons du compte sont supprimes, mais la
+      // table WelcomeCouponClaim n'est PAS touchee. Elle n'a aucune cle
+      // etrangere vers User et ne contient que des empreintes HMAC (jamais
+      // d'email/telephone en clair) : c'est voulu, la conserver est ce qui
+      // empeche un re-inscrit apres suppression de reclamer un nouveau coupon
+      // de livraison offerte. Toutes les autres donnees personnelles sont
+      // bien supprimees ci-dessus.
       await tx.coupon.deleteMany({ where: { user_id: user.id } });
       // Plus aucune commande / demande ne reference ces adresses.
       await tx.address.deleteMany({ where: { user_id: user.id } });
@@ -315,6 +324,23 @@ userRouter.put(
       }
       return user;
     });
+
+    // Anti-abus coupon : un telephone ajoute ou change est une nouvelle cle
+    // de reclonnement. Aucun coupon n'est accorde a cette etape (pas de
+    // notification non plus) : on enregistre simplement l'empreinte si ce
+    // compte a DEJA profite du coupon, pour qu'un autre compte avec le meme
+    // telephone ne puisse pas le re-clamer. Seules des empreintes sont
+    // ecrites, jamais le numero en clair.
+    if (body.phone !== undefined && body.phone) {
+      const hadWelcomeCoupon = await prisma.coupon.findUnique({
+        where: { user_id_source: { user_id: updated.id, source: 'WELCOME' } },
+        select: { id: true },
+      });
+      if (hadWelcomeCoupon) {
+        await recordWelcomeClaims({ phone: body.phone });
+      }
+    }
+
     res.json(toSafeUser(updated));
   }),
 );
