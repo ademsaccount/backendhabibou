@@ -9,6 +9,7 @@ import { logger } from '../lib/logger';
 import { requireAuth } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import {
+  appleLoginSchema,
   forgotPasswordSchema,
   googleLoginSchema,
   loginSchema,
@@ -20,6 +21,7 @@ import {
 } from '../schemas';
 import { sha256, signAccessToken, signRefreshToken, verifyRefreshToken } from '../lib/jwt';
 import { verifyGoogleIdToken } from '../lib/google';
+import { exchangeAppleAuthorizationCode, verifyAppleIdentityToken } from '../lib/apple';
 import { isMailConfigured, sendEmailVerificationCode, sendPasswordResetCode } from '../lib/mailer';
 import {
   RESEND_COOLDOWN_MS,
@@ -42,6 +44,20 @@ const router = Router();
  * du client derriere le proxy Render.
  */
 const googleRateLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: {
+    error: {
+      code: 'TOO_MANY_REQUESTS',
+      message: 'Trop de tentatives de connexion. Reessayez dans quelques minutes.',
+    },
+  },
+});
+
+/** Meme limite que Google pour la connexion Apple (iOS). */
+const appleRateLimit = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 20,
   standardHeaders: 'draft-8',
@@ -181,9 +197,12 @@ type SendVerificationResult =
  * Le code en clair n'est jamais journalise.
  */
 async function sendVerificationCode(
-  user: { id: string; email: string; locale: string | null },
+  user: { id: string; email: string | null; locale: string | null },
   respectCooldown = true,
 ): Promise<SendVerificationResult> {
+  // Un compte Apple sans email ne passe jamais par la verification d'email.
+  if (!user.email) return { status: 'failed' };
+
   if (respectCooldown) {
     const last = await prisma.emailVerificationCode.findFirst({
       where: { user_id: user.id },
@@ -462,6 +481,140 @@ router.post(
 );
 
 /**
+ * Connexion Apple native (iOS uniquement) : l'app envoie le jeton d'identite
+ * obtenu par `AppleAuthentication.signInAsync()`, le nonce brut et le code
+ * d'autorisation. Le backend verifie le jeton, retrouve/cree le compte par
+ * `apple_id` (jamais par l'email comme cle primaire) puis emet NOS tokens.
+ *
+ * Regles : 400 (champs manquants, via Zod), 401 (jeton invalide / nonce),
+ * 409 (email deja lie a un autre compte Apple). Aucun jeton n'est journalise.
+ */
+router.post(
+  '/apple',
+  appleRateLimit,
+  validate(appleLoginSchema),
+  asyncHandler(async (req, res) => {
+    const {
+      identityToken,
+      authorizationCode,
+      rawNonce,
+      fullName,
+      email: clientEmail,
+    } = req.body as {
+      identityToken: string;
+      authorizationCode?: string;
+      rawNonce: string;
+      fullName?: string;
+      email?: string;
+    };
+
+    let payload;
+    try {
+      payload = await verifyAppleIdentityToken(identityToken, rawNonce);
+    } catch {
+      // Ne jamais journaliser le jeton ni le message brut de verification.
+      logger.warn('auth', 'apple token verification failed');
+      throw ApiError.unauthorized('Connexion Apple invalide ou expiree', 'INVALID_APPLE_TOKEN');
+    }
+
+    if (!payload.sub) {
+      throw ApiError.unauthorized('Jeton Apple incomplet', 'INVALID_APPLE_TOKEN');
+    }
+
+    // Email prouve par Apple. Il peut etre absent (utilisateur qui masque son
+    // email) ou etre une adresse relais privee. L'email envoye par le client
+    // n'est utilise qu'en secours et ne sert JAMAIS a lier un compte existant.
+    const verifiedEmail = payload.email?.trim().toLowerCase();
+    const email = verifiedEmail ?? clientEmail?.trim().toLowerCase();
+
+    const appleName = (fullName ?? '').trim();
+    const fallbackName =
+      appleName ||
+      (email && !email.endsWith('@privaterelay.appleid.com') ? email.split('@')[0] : '') ||
+      'Client Habichou';
+
+    let user = await prisma.user.findUnique({ where: { apple_id: payload.sub } });
+    let outcome: 'existing' | 'linked' | 'created' = 'existing';
+    let justVerified = false;
+
+    if (!user && verifiedEmail) {
+      // Compte local existant avec le meme email VERIFIE par Apple : on lie
+      // Apple sans toucher au mot de passe ni a auth_provider.
+      const byEmail = await prisma.user.findUnique({ where: { email: verifiedEmail } });
+      if (byEmail) {
+        if (byEmail.apple_id && byEmail.apple_id !== payload.sub) {
+          throw ApiError.conflict(
+            'Cet email est deja associe a un autre compte Apple',
+            'APPLE_ACCOUNT_LINKED',
+          );
+        }
+        justVerified = !byEmail.email_verified_at;
+        user = await prisma.user.update({
+          where: { id: byEmail.id },
+          data: {
+            apple_id: payload.sub,
+            ...(byEmail.email_verified_at ? {} : { email_verified_at: new Date() }),
+          },
+        });
+        outcome = 'linked';
+      }
+    }
+
+    if (!user) {
+      user = await prisma.user.create({
+        data: {
+          email: email ?? null,
+          password_hash: null,
+          // Le nom n'est fourni qu'a la premiere autorisation : sans lui, un
+          // placeholder editable est affiche dans le profil.
+          full_name: fallbackName,
+          role: 'client',
+          apple_id: payload.sub,
+          auth_provider: 'apple',
+          // Apple a delivre un jeton signe : le compte est verifie meme sans
+          // email (l'app ne depend pas de l'email pour s'authentifier).
+          email_verified_at: new Date(),
+        },
+      });
+      outcome = 'created';
+      justVerified = true;
+    }
+
+    // Compte Apple cree avant la colonne / compte non verifie : on le verifie.
+    if (!user.email_verified_at) {
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: { email_verified_at: new Date() },
+      });
+      justVerified = true;
+    }
+
+    // Refresh token Apple : necessaire uniquement pour revoquer l'acces lors de
+    // la suppression du compte. Best effort (ne bloque jamais la connexion).
+    if (authorizationCode) {
+      const appleRefreshToken = await exchangeAppleAuthorizationCode(authorizationCode);
+      if (appleRefreshToken) {
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { apple_refresh_token: appleRefreshToken },
+        });
+      }
+    }
+
+    logger.info('auth', `apple sign-in ${outcome} user=${user.id}`);
+
+    // Coupon de bienvenue : accorde a la premiere verification du compte.
+    if (justVerified) {
+      await grantWelcomeCoupon(user.id);
+      void sendWelcomeCouponNotification(user.id);
+    }
+
+    const tokens = await issueTokens(user.id, user.role);
+    res.json({ ...tokens, user: toSafeUser(user) });
+  }),
+);
+
+/**
  * Verification de l'email, etape 2 : validation du code + connexion.
  *
  * - code hashe en base, expire apres EMAIL_VERIFICATION_TTL_MIN, essais max ;
@@ -579,7 +732,7 @@ router.post(
     const ok = { ok: true as const };
 
     const user = await prisma.user.findUnique({ where: { email } });
-    if (!user) return res.json(ok);
+    if (!user || !user.email) return res.json(ok);
 
     // Cooldown par compte : ne pas renvoyer un code a chaque clic.
     const last = await prisma.passwordResetCode.findFirst({
@@ -643,7 +796,9 @@ router.post(
     };
 
     const user = await prisma.user.findUnique({ where: { email } });
-    if (!user) throw ApiError.badRequest('Code invalide ou expire', 'INVALID_RESET_CODE');
+    if (!user || !user.email) {
+      throw ApiError.badRequest('Code invalide ou expire', 'INVALID_RESET_CODE');
+    }
 
     const record = await prisma.passwordResetCode.findFirst({
       where: { user_id: user.id },

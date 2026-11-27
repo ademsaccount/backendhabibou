@@ -28,6 +28,20 @@ const EnvSchema = z.object({
   GOOGLE_IOS_CLIENT_ID: z.string().default(''),
   GOOGLE_ANDROID_CLIENT_ID: z.string().default(''),
   /**
+   * Sign in with Apple (iOS uniquement). L'audience du jeton d'identite et le
+   * client_id Apple est le bundle identifier de l'app.
+   *
+   * APPLE_TEAM_ID / APPLE_KEY_ID / APPLE_PRIVATE_KEY sont necessaires pour
+   * construire le client_secret ES256 (echange du code + revocation). Sans
+   * eux, la connexion Apple par jeton reste possible mais aucun refresh token
+   * n'est stocke (la revocation a la suppression est alors ignoree).
+   */
+  APPLE_BUNDLE_ID: z.string().default('com.adem1.habichou'),
+  APPLE_TEAM_ID: z.string().default(''),
+  APPLE_KEY_ID: z.string().default(''),
+  /** Cle privee .p8 Apple ; les "\n" litteraux sont remplaces au chargement. */
+  APPLE_PRIVATE_KEY: z.string().default(''),
+  /**
    * Envoi d'emails (reinitialisation de mot de passe) via l'API HTTP Mailjet.
    * Optionnel : sans configuration, le code n'est renvoye qu'en developpement.
    * (SMTP inutilisable : Render bloque les ports 25/465/587.)

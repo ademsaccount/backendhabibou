@@ -6,6 +6,7 @@ import { prisma } from '../lib/prisma';
 import { ApiError, asyncHandler } from '../lib/errors';
 import { logger } from '../lib/logger';
 import { verifyGoogleIdToken } from '../lib/google';
+import { revokeAppleRefreshToken } from '../lib/apple';
 import { removePublicUrl } from '../lib/upload';
 import { requireAuth, requireRole } from '../middleware/auth';
 import { validate } from '../middleware/validate';
@@ -50,8 +51,9 @@ const deleteAccountRateLimit = rateLimit({
  *
  * Re-authentification :
  * - compte avec mot de passe local : `password` verifie par bcrypt ;
- * - compte Google SANS mot de passe : `confirmation` = "DELETE" (le JWT prouve
- *   deja la session) OU un `idToken` Google frais dont le `sub` correspond.
+ * - compte Google / Apple SANS mot de passe : `confirmation` = "DELETE" (le
+ *   JWT prouve deja la session) OU un `idToken` Google frais dont le `sub`
+ *   correspond.
  *
  * Les commandes ne sont jamais supprimees : elles sont anonymisees (user_id et
  * address_id NULL, notes libres effacees). Le reste des donnees personnelles
@@ -59,9 +61,8 @@ const deleteAccountRateLimit = rateLimit({
  * APRES le commit, en best effort : un echec Storage ne bloque pas la
  * suppression du compte (on le loggue).
  *
- * TODO Sign in with Apple : si ce flux est ajoute un jour, revoquer ici le
- * refresh token Apple (https://appleid.apple.com/auth/revoke) avant de
- * supprimer le compte.
+ * Pour un compte Apple, le refresh token Apple est revoque AVANT la
+ * suppression (best effort : un echec est loggue mais ne bloque pas).
  */
 userRouter.delete(
   '/me',
@@ -114,6 +115,21 @@ userRouter.delete(
       }
     } else if ((body.confirmation ?? '').trim().toUpperCase() !== 'DELETE') {
       throw ApiError.badRequest('Tapez DELETE pour confirmer', 'REAUTH_REQUIRED');
+    }
+
+    // --- Revocation Apple (best effort) ---
+    // Un echec reseau / de configuration ne doit jamais empecher la suppression
+    // du compte : on loggue et on continue.
+    if (user.apple_refresh_token) {
+      try {
+        await revokeAppleRefreshToken(user.apple_refresh_token);
+      } catch (error) {
+        logger.warn(
+          'account',
+          `revocation Apple impossible avant suppression user=${user.id}`,
+          error instanceof Error ? error : String(error),
+        );
+      }
     }
 
     // --- Suppression + anonymisation dans UNE transaction ---

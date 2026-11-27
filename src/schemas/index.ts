@@ -35,6 +35,21 @@ export const googleLoginSchema = z.object({
   }),
 });
 
+/**
+ * Connexion Apple native (iOS) : jeton d'identite + nonce brut (le jeton
+ * contient le SHA-256 du nonce), code d'autorisation pour recuperer le
+ * refresh token, et nom/email fournis UNIQUEMENT a la premiere connexion.
+ */
+export const appleLoginSchema = z.object({
+  body: z.object({
+    identityToken: z.string().trim().min(1, 'identityToken requis'),
+    authorizationCode: z.string().trim().min(1).optional(),
+    rawNonce: z.string().trim().min(1, 'rawNonce requis'),
+    fullName: z.string().trim().max(120).optional(),
+    email: z.string().trim().toLowerCase().regex(emailRe, 'Email invalide').optional(),
+  }),
+});
+
 /** Mot de passe oublie : envoi d'un code a 6 chiffres par email. */
 export const forgotPasswordSchema = z.object({
   body: z.object({

@@ -88,11 +88,14 @@ enum CouponSource {
 enum AuthProvider {
   local
   google
+  apple
 }
 
 model User {
   id            String   @id @default(uuid())
-  email         String   @unique
+  // Nullable : un compte Sign in with Apple peut ne fournir aucun email
+  // (l'utilisateur peut choisir de le masquer). L'identite repose sur apple_id.
+  email         String?  @unique
   phone         String?
   password_hash String?
   full_name     String
@@ -100,6 +103,10 @@ model User {
   avatar_url    String?
   // Identifiant Google stable (payload.sub du jeton ID) — unique par compte.
   google_id     String?  @unique
+  // Identifiant Apple stable (payload.sub du jeton d'identite) — unique par compte.
+  apple_id      String?  @unique
+  // Refresh token Apple (revocation a la suppression du compte). Jamais expose.
+  apple_refresh_token String?
   auth_provider AuthProvider @default(local)
   // Jeton Expo Push (app sudo_habichou) â€” null = notifications push non enregistrees.
   expo_push_token String?
