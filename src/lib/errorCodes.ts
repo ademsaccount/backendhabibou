@@ -52,6 +52,9 @@ export const ERROR_CODES = [
   'EMAIL_NOT_VERIFIED',
   'MAIL_UNAVAILABLE',
   'TOO_MANY_REQUESTS',
+  // suppression de compte (Apple 5.1.1(v))
+  'ACTIVE_ORDER',
+  'REAUTH_REQUIRED',
   // catalogue / commerce
   'MEDICATION_CATEGORY_NOT_FOUND',
   'INGREDIENT_NOT_FOUND',

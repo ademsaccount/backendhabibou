@@ -133,13 +133,15 @@ export async function changeOrderStatus(
       data: { status: to === 'confirmed' ? 'accepted' : 'rejected' },
     });
   }
-  await notify({
-    user_id: updated.user_id,
-    title: 'Commande mise a jour',
-    body: STATUS_LABELS[to],
-    type: 'order',
-    data: { order_id: updated.id, status: updated.status },
-  });
+  if (updated.user_id) {
+    await notify({
+      user_id: updated.user_id,
+      title: 'Commande mise a jour',
+      body: STATUS_LABELS[to],
+      type: 'order',
+      data: { order_id: updated.id, status: updated.status },
+    });
+  }
 
   if (updated.livreur && updated.livreur.user_id !== opts.actorUserId) {
     await notify({
@@ -159,11 +161,13 @@ export async function changeOrderStatus(
 
   // Push client (confirmed / on_the_way / delivered / cancelled) — APRES la mise a
   // jour en base, best effort : ne doit jamais faire echouer la requete principale.
-  try {
-    await pushOrderStatusToUser(updated.user_id, updated.id, to);
-  } catch (err) {
-    // pushToUser n leve pas — garde-fou par principe.
-    void err;
+  if (updated.user_id) {
+    try {
+      await pushOrderStatusToUser(updated.user_id, updated.id, to);
+    } catch (err) {
+      // pushToUser n leve pas — garde-fou par principe.
+      void err;
+    }
   }
 
   // Course terminee par son livreur : il se libere -> on purge la file d'attente.

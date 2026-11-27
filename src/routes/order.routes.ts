@@ -655,18 +655,20 @@ orderRouter.put(
       }
       return result;
     });
-    await notify({
-      user_id: order.user_id,
-      title: 'Commande annulee',
-      body: 'Votre commande a ete annulee',
-      type: 'order',
-      data: { order_id: order.id },
-    });
-    // Push client (annulation) — apres la mise a jour, best effort.
-    try {
-      await pushOrderStatusToUser(updated.user_id, updated.id, 'cancelled');
-    } catch (err) {
-      void err;
+    if (updated.user_id) {
+      await notify({
+        user_id: updated.user_id,
+        title: 'Commande annulee',
+        body: 'Votre commande a ete annulee',
+        type: 'order',
+        data: { order_id: order.id },
+      });
+      // Push client (annulation) — apres la mise a jour, best effort.
+      try {
+        await pushOrderStatusToUser(updated.user_id, updated.id, 'cancelled');
+      } catch (err) {
+        void err;
+      }
     }
     res.json(updated);
   }),

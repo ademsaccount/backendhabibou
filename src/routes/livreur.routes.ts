@@ -318,17 +318,19 @@ livreurRouter.post(
       body.kind === 'price' && body.price != null
         ? `Prix proposé : ${body.price.toFixed(2)} MAD`
         : (body.text ?? '').slice(0, 80);
-    await notify({
-      user_id: order.user_id,
-      title: 'Nouveau message',
-      body: preview,
-      type: 'order',
-      data: { order_id: order.id },
-    });
-    try {
-      await pushNewMessageToUser(order.user_id, order.id, preview);
-    } catch (err) {
-      void err;
+    if (order.user_id) {
+      await notify({
+        user_id: order.user_id,
+        title: 'Nouveau message',
+        body: preview,
+        type: 'order',
+        data: { order_id: order.id },
+      });
+      try {
+        await pushNewMessageToUser(order.user_id, order.id, preview);
+      } catch (err) {
+        void err;
+      }
     }
     await notifyAdmins('Nouveau message livreur', preview, 'order', { order_id: order.id });
     void pushAdmins({

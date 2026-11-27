@@ -77,6 +77,33 @@ export async function removeFromBucket(bucket: string, path: string): Promise<vo
   if (error) throw ApiError.badRequest(`Echec de suppression : ${error.message}`, 'UPLOAD_FAILED');
 }
 
+/**
+ * Extrait le chemin Storage d'une URL publique Supabase
+ * (`.../storage/v1/object/public/<bucket>/<path>`). Retourne null pour une URL
+ * externe (ex. photo Google) ou une URL d'un autre bucket : ces fichiers ne
+ * nous appartiennent pas et ne doivent pas etre supprimes.
+ */
+export function storagePathFromPublicUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const marker = `/storage/v1/object/public/${env.SUPABASE_STORAGE_BUCKET}/`;
+  const index = url.indexOf(marker);
+  if (index === -1) return null;
+  const path = url.slice(index + marker.length).split('?')[0];
+  if (!path) return null;
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return path;
+  }
+}
+
+/** Supprime (best effort cote appelant) le fichier designe par une URL publique du bucket principal. */
+export async function removePublicUrl(url: string | null | undefined): Promise<void> {
+  const path = storagePathFromPublicUrl(url);
+  if (!path) return;
+  await removeFromBucket(env.SUPABASE_STORAGE_BUCKET, path);
+}
+
 /** Cree le bucket s'il n'existe pas (public). Utilise par le seed — le bucket
  *  public est aussi creable manuellement (voir README : Storage -> New bucket). */
 export async function ensurePublicBucket(bucket: string): Promise<void> {

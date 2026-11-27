@@ -1202,17 +1202,19 @@ adminRouter.post(
       body.kind === 'price' && body.price != null
         ? `Prix propose : ${body.price.toFixed(2)} MAD`
         : (body.text ?? '').slice(0, 80);
-    await notify({
-      user_id: order.user_id,
-      title: 'Nouveau message',
-      body: preview,
-      type: 'order',
-      data: { order_id: order.id },
-    });
-    try {
-      await pushNewMessageToUser(order.user_id, order.id, preview);
-    } catch (err) {
-      void err;
+    if (order.user_id) {
+      await notify({
+        user_id: order.user_id,
+        title: 'Nouveau message',
+        body: preview,
+        type: 'order',
+        data: { order_id: order.id },
+      });
+      try {
+        await pushNewMessageToUser(order.user_id, order.id, preview);
+      } catch (err) {
+        void err;
+      }
     }
     await notifyAssignedLivreur(order, req.user!.id, preview);
     res.status(201).json(message);
@@ -1276,13 +1278,15 @@ adminRouter.post(
       status: 'pending',
       label: 'En attente de confirmation',
     });
-    await notify({
-      user_id: updated.user_id,
-      title: 'Commande reattribuee',
-      body: `Commande ${order.id.slice(0, 8)} : un nouveau livreur va la prendre en charge`,
-      type: 'order',
-      data: { order_id: order.id },
-    });
+    if (updated.user_id) {
+      await notify({
+        user_id: updated.user_id,
+        title: 'Commande reattribuee',
+        body: `Commande ${order.id.slice(0, 8)} : un nouveau livreur va la prendre en charge`,
+        type: 'order',
+        data: { order_id: order.id },
+      });
+    }
     res.json(updated);
   }),
 );

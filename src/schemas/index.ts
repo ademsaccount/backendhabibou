@@ -124,6 +124,20 @@ export const updateAddressSchema = z.object({
   }),
 });
 
+/**
+ * Suppression definitive du compte (Apple 5.1.1(v)).
+ * - compte avec mot de passe : `password` obligatoire (verifie par bcrypt) ;
+ * - compte Google sans mot de passe : `confirmation` = "DELETE" OU un ID token
+ *   Google frais (`idToken`) dont le `sub` correspond au compte.
+ */
+export const deleteAccountSchema = z.object({
+  body: z.object({
+    password: z.string().min(1).optional(),
+    confirmation: z.string().trim().optional(),
+    idToken: z.string().trim().min(1).optional(),
+  }),
+});
+
 /** Profil : l'utilisateur modifie ses propres nom / téléphone / avatar (+ véhicule livreur). */
 export const updateMeSchema = z.object({
   body: z.object({

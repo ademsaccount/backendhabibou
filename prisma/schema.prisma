@@ -499,7 +499,9 @@ model Coupon {
 
 model Order {
   id                String        @id @default(uuid())
-  user_id           String
+  // Nullable : la suppression du compte ANONYMISE la commande (ON DELETE SET NULL)
+  // au lieu de casser les archives comptables du commerce.
+  user_id           String?
   restaurant_id     String?
   custom_request_id String?       @unique
   livreur_id        String?
@@ -518,7 +520,9 @@ model Order {
   queued_at         DateTime?
   diffused_to       String[]  @default([])
   rejected_by       String[]  @default([])
-  address_id        String
+  // Nullable : l'adresse est une donnee personnelle, supprimee avec le compte
+  // (ON DELETE SET NULL). La commande garde ses totaux, dates et articles.
+  address_id        String?
   /** Coupon de bienvenue applique (null = aucun). Unique : un coupon = une commande. */
   coupon_id         String?       @unique
   /** Montant de frais de livraison rembourse par le coupon (0 = aucun remboursement). */
@@ -526,11 +530,11 @@ model Order {
   created_at        DateTime      @default(now())
   delivered_at      DateTime?
 
-  user           User           @relation(fields: [user_id], references: [id])
+  user           User?          @relation(fields: [user_id], references: [id], onDelete: SetNull)
   restaurant     Restaurant?    @relation(fields: [restaurant_id], references: [id])
   custom_request CustomRequest? @relation(fields: [custom_request_id], references: [id])
   livreur        Livreur?       @relation(fields: [livreur_id], references: [id])
-  address        Address        @relation(fields: [address_id], references: [id])
+  address        Address?       @relation(fields: [address_id], references: [id], onDelete: SetNull)
   coupon         Coupon?        @relation(fields: [coupon_id], references: [id])
   items          OrderItem[]
   messages       OrderMessage[]
